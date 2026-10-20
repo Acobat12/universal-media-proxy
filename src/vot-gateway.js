@@ -1,5 +1,4 @@
 import { Readable } from 'node:stream';
-import { timingSafeEqual } from 'node:crypto';
 import worker from './vot-worker.js';
 
 const records = new Map();
@@ -8,15 +7,13 @@ const meta = {
   async get(key) { const item = records.get(key); if (!item) return null; if (item.expires <= Date.now()) { records.delete(key); return null; } return item.value; },
 };
 const allowedPaths = ['/vot/metadata', '/video-translation/', '/video-subtitles/', '/stream-translation/', '/session/create'];
-function sameKey(actual, expected) { const a = Buffer.from(String(actual || '')), b = Buffer.from(expected); return a.length === b.length && timingSafeEqual(a,b); }
-export function createVotGateway({ key = '', yandexApiUrl, serverId, maxBodyBytes = 1048576 } = {}) {
+export function createVotGateway({ yandexApiUrl, serverId, maxBodyBytes = 1048576 } = {}) {
   const env = { YANDEX_API_URL: yandexApiUrl, SERVER_ID: serverId, VOT_META_KV: meta };
   return async (req, res) => {
     try {
       const incoming = new URL(req.url || '/', 'http://localhost');
       const path = incoming.pathname.slice('/vot'.length) || '/';
       if (!allowedPaths.some(p => path === p || (p.endsWith('/') && path.startsWith(p)))) { res.writeHead(404); return res.end(); }
-      if (key && req.method !== 'OPTIONS' && !sameKey(req.headers['x-proxy-key'], key)) { res.writeHead(401); return res.end('Unauthorized'); }
       const headers = new Headers();
       for (const [name, value] of Object.entries(req.headers)) if (value != null && !['host','connection','transfer-encoding','content-length'].includes(name)) headers.set(name, Array.isArray(value) ? value.join(', ') : value);
       const hasBody = !['GET','HEAD'].includes(req.method);

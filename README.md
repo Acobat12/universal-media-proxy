@@ -53,7 +53,7 @@ git clone https://github.com/Acobat12/universal-media-proxy.git && cd universal-
 5. **Лимит SSD-кэша** в МиБ, по умолчанию `1024` (1 ГиБ).
 6. Подтверждение установки Node.js и системной службы.
 
-Установщик сам создаст случайные `TOKEN_SECRET`, `API_KEY` и `VOT_PROXY_API_KEY`, создаст отдельного системного пользователя, настроит `systemd`, SSD-кэш и при домене — Caddy с автоматическим HTTPS. Ключи будут показаны в конце и сохранены в `/etc/universal-media-proxy.env` с правами доступа только для root.
+Установщик сам создаст случайные `TOKEN_SECRET` и `API_KEY`, создаст отдельного системного пользователя, настроит `systemd`, SSD-кэш и при домене — Caddy с автоматическим HTTPS. Ключи будут показаны в конце и сохранены в `/etc/universal-media-proxy.env` с правами доступа только для root.
 
 **Важно:** скрипт не настраивает DNS-записи у регистратора и не открывает порты в панели VPS. Сертификат Let's Encrypt выдаётся Caddy при выполнении сетевых условий; успешное выполнение установщика само по себе не гарантирует выдачу сертификата.
 
@@ -163,7 +163,7 @@ POST https://proxy.example.com/vot/video-translation/translate
 сервер выполняет следующую последовательность:
 
 1. Проверяет, что `ENABLE_VOT_PROXY=true` и путь разрешён.
-2. Если задан `VOT_PROXY_API_KEY`, проверяет заголовок `X-Proxy-Key`.
+2. Не требует `X-Proxy-Key`: VOT API общедоступен.
 3. Ограничивает размер тела запроса (`VOT_MAX_BODY_BYTES`).
 4. Обрабатывает **Protobuf envelope** (`application/x-vot-envelope+protobuf`) либо двухшаговую схему с предварительной передачей метаданных. Для обычного JSON этот маршрут **не предназначен**.
 5. Пересылает сформированный запрос на `https://api.browser.yandex.ru/video-translation/translate` (или на адрес `YANDEX_API_URL`, если он явно задан).
@@ -195,7 +195,6 @@ POST https://proxy.example.com/vot/video-translation/translate
 
 ```dotenv
 ENABLE_VOT_PROXY=true
-VOT_PROXY_API_KEY=СЛУЧАЙНЫЙ_КЛЮЧ_ИЗ_УСТАНОВЩИКА
 VOT_MAX_BODY_BYTES=1048576
 ```
 
@@ -220,19 +219,18 @@ sudo systemctl restart universal-media-proxy
 curl -i https://proxy.example.com/health
 ```
 
-Проверить, что защищённый VOT-маршрут **отказывает без ключа**:
+Проверить публичный VOT-маршрут без ключа:
 
 ```bash
 curl -i -X POST https://proxy.example.com/vot/video-translation/translate
 ```
 
-При включённом `VOT_PROXY_API_KEY` ожидается `401 Unauthorized`. Это хороший признак работы проверки доступа, **но не подтверждение успешного перевода**.
+Ответ не должен быть `401` из-за отсутствия `X-Proxy-Key`. Это **не подтверждение успешного перевода**.
 
-Проверить, что сервер принимает ключ и затем проверяет тип данных:
+Проверить обработку запроса без ключа:
 
 ```bash
 curl -i -X POST https://proxy.example.com/vot/video-translation/translate \
-  -H 'X-Proxy-Key: ВАШ_VOT_PROXY_API_KEY' \
   -H 'Content-Type: application/json' \
   --data '{}'
 ```
@@ -251,9 +249,9 @@ sudo journalctl -u universal-media-proxy -f
 
 - Яндекс может изменять API, требовать актуальные подписи, токены, специфичные заголовки и отклонять запросы с VPS.
 - Прокси пересылает запросы, но **не создаёт самостоятельно** недостающие авторизационные данные клиента.
-- Параметр `VOT_PROXY_API_KEY` защищает входящие запросы к VPS; он **не является** ключом доступа к API Яндекса.
+- VOT API открыт без ключа для всех; публичный сервер может потреблять значительный трафик и ресурсы.
 - Реальная связка Bilibili → Media Proxy → VOT API Proxy → Яндекс не проверена сквозным тестом; локальные тесты проверяют лишь отдельные маршруты и логику.
-- Не рекомендуется делать VOT API Proxy публичным без контроля доступа, сетевых лимитов и наблюдения за расходом трафика.
+- VOT API Proxy публичен по запросу владельца; отслеживайте расход трафика и ресурсов.
 
 ## 7. Изменить настройки после установки
 
@@ -274,7 +272,7 @@ sudo systemctl restart universal-media-proxy
 | `DISK_CACHE_MAX_FILE_BYTES` | Максимальный размер одного файла |
 | `MAX_CONCURRENT_STREAMS` | Число одновременных выдач |
 | `ENABLE_VOT_PROXY` | Включение маршрутов `/vot/*` |
-| `VOT_PROXY_API_KEY` | Ключ доступа к VOT-прокси |
+| `ENABLE_VOT_PROXY` | Включает публичный VOT-прокси без ключа |
 | `ENABLE_YTDLP` | Необязательный резервный извлекатель, по умолчанию выключен |
 
 Установщик **предлагает сразу установить yt-dlp из официальных GitHub Releases**. По умолчанию выбран ответ **Да**: установщик загружает исполняемый файл `yt-dlp`, сверяет SHA-256 с опубликованным в релизе `SHA2-256SUMS`, помещает его в `/usr/local/bin/yt-dlp` и включает резервное извлечение для **Bilibili**. Установка `python3` выполняется автоматически.
@@ -347,4 +345,4 @@ npm run check
 
 ### Проверенные изменения для исходников VOT
 
-См. [инструкцию по адаптации VOT](docs/VOT_CODE_CHANGES_RU.md) и [справочный патч](docs/VOT_REFERENCE_CHANGES.patch). **Режим 3 требует Protobuf Envelope; стандартный режим 2 не гарантирует работу с данным сервером.** При включённом `VOT_PROXY_API_KEY` без `X-Proxy-Key` клиент получит 401.
+См. [инструкцию по адаптации VOT](docs/VOT_CODE_CHANGES_RU.md) и [справочный патч](docs/VOT_REFERENCE_CHANGES.patch). **Режим 3 требует Protobuf Envelope; стандартный режим 2 не гарантирует работу с данным сервером.** Публичный VOT API не требует `X-Proxy-Key`.

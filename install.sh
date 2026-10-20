@@ -64,7 +64,6 @@ cp -a src package.json /opt/universal-media-proxy/
 chown -R root:root /opt/universal-media-proxy
 SECRET="$(openssl rand -hex 32)"
 API_KEY_VALUE="$(openssl rand -hex 24)"
-VOT_KEY="$(openssl rand -hex 24)"
 if [[ "$MODE" == ip ]]; then BIND=0.0.0.0; else BIND=127.0.0.1; fi
 cat > /etc/universal-media-proxy.env <<ENV
 HOST=$BIND
@@ -86,7 +85,6 @@ DISK_CACHE_TTL_MS=900000
 DISK_CACHE_MAX_BYTES=$((CACHE_MB * 1048576))
 DISK_CACHE_MAX_FILE_BYTES=268435456
 ENABLE_VOT_PROXY=$VOT_ENABLED
-VOT_PROXY_API_KEY=$VOT_KEY
 VOT_MAX_BODY_BYTES=1048576
 ENV
 chmod 0600 /etc/universal-media-proxy.env
@@ -132,8 +130,8 @@ echo
 echo "Установка завершена. Адрес: $PUBLIC_URL"
 echo "API ключ: $API_KEY_VALUE"
 echo "yt-dlp: $INSTALL_YTDLP (разрешённые источники: bilibili.com)"
-if [[ "$VOT_ENABLED" == true ]]; then echo "VOT ключ: $VOT_KEY"; fi
-echo 'СОХРАНИТЕ КЛЮЧИ: они также находятся в /etc/universal-media-proxy.env (доступ root).'
+if [[ "$VOT_ENABLED" == true ]]; then echo "VOT API открыт без ключа: $PUBLIC_URL/vot"; fi
+echo 'API ключ Media Proxy хранится в /etc/universal-media-proxy.env (доступ root).'
 echo "Проверка: curl $PUBLIC_URL/health"
 echo 'Логи: sudo journalctl -u universal-media-proxy -f'
 echo 'Служба: sudo systemctl status universal-media-proxy'
