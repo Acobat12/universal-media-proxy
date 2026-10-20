@@ -63,18 +63,15 @@ chown ump:ump /var/cache/universal-media-proxy
 cp -a src package.json /opt/universal-media-proxy/
 chown -R root:root /opt/universal-media-proxy
 SECRET="$(openssl rand -hex 32)"
-API_KEY_VALUE="$(openssl rand -hex 24)"
 if [[ "$MODE" == ip ]]; then BIND=0.0.0.0; else BIND=127.0.0.1; fi
 cat > /etc/universal-media-proxy.env <<ENV
 HOST=$BIND
 PORT=$PUBLIC_PORT
 PUBLIC_BASE_URL=$PUBLIC_URL
 TOKEN_SECRET=$SECRET
-API_KEY=$API_KEY_VALUE
 ALLOWED_UPSTREAM_HOSTS=bilivideo.com,bilibili.com,hdslb.com
 MAX_TRANSFER_BYTES=1073741824
 MAX_CONCURRENT_STREAMS=2
-DAILY_TRANSFER_BYTES=2147483648
 ENABLE_YTDLP=$INSTALL_YTDLP
 YTDLP_ALLOWED_HOSTS=bilibili.com
 DEFAULT_AUDIO_MODE=disk
@@ -128,10 +125,8 @@ sleep 2
 systemctl is-active --quiet universal-media-proxy || { journalctl -u universal-media-proxy -n 50 --no-pager; exit 1; }
 echo
 echo "Установка завершена. Адрес: $PUBLIC_URL"
-echo "API ключ: $API_KEY_VALUE"
 echo "yt-dlp: $INSTALL_YTDLP (разрешённые источники: bilibili.com)"
 if [[ "$VOT_ENABLED" == true ]]; then echo "VOT API открыт без ключа: $PUBLIC_URL/vot"; fi
-echo 'API ключ Media Proxy хранится в /etc/universal-media-proxy.env (доступ root).'
 echo "Проверка: curl $PUBLIC_URL/health"
 echo 'Логи: sudo journalctl -u universal-media-proxy -f'
 echo 'Служба: sudo systemctl status universal-media-proxy'

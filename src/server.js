@@ -1,6 +1,5 @@
 import { createVotGateway } from './vot-gateway.js';
 import http from 'node:http';
-import { timingSafeEqual } from 'node:crypto';
 import { Registry } from './core/registry.js';
 import { bilibili } from './adapters/bilibili.js';
 import { sign, verify } from './core/token.js';
@@ -14,19 +13,14 @@ import { extractAudio } from './core/extraction.js';
 
 const registry = new Registry().register(bilibili);
 const DEFAULT_HOSTS = ['bilivideo.com', 'bilibili.com', 'hdslb.com'];
-function safeKey(a, b) { const x = Buffer.from(a), y = Buffer.from(b); return x.length === y.length && timingSafeEqual(x, y); }
-export function createHandler({ secret, apiKey, publicBaseUrl, allowedHosts = DEFAULT_HOSTS, fetcher = fetch, mediaFetcher = pinnedFetch, ttlSeconds = 900, maxBytes = 1024 * 1024 * 1024, maxConcurrent = 4, dailyByteLimit = 2 * 1024 ** 3, fallbackEnabled = false, fallbackHosts = [], ytdlp, defaultMode = 'stream', parallelThreads = 8, parallelChunkBytes = 524288, cacheMaxBytes = 67108864, cacheMaxFileBytes = 33554432, cacheTtlMs = 600000, diskCacheDir, diskCacheTtlMs = 900000, diskCacheMaxBytes = 1073741824, diskCacheMaxFileBytes = 268435456 } = {}) {
+export function createHandler({ secret, publicBaseUrl, allowedHosts = DEFAULT_HOSTS, fetcher = fetch, mediaFetcher = pinnedFetch, ttlSeconds = 900, maxBytes = 1024 * 1024 * 1024, maxConcurrent = 4, fallbackEnabled = false, fallbackHosts = [], ytdlp, defaultMode = 'stream', parallelThreads = 8, parallelChunkBytes = 524288, cacheMaxBytes = 67108864, cacheMaxFileBytes = 33554432, cacheTtlMs = 600000, diskCacheDir, diskCacheTtlMs = 900000, diskCacheMaxBytes = 1073741824, diskCacheMaxFileBytes = 268435456 } = {}) {
   if (!secret || secret.length < 32) throw Error('TOKEN_SECRET must be at least 32 characters');
-  if (!apiKey || apiKey.length < 16) throw Error('API_KEY must be at least 16 characters');
   if (!publicBaseUrl) throw Error('PUBLIC_BASE_URL required');
   const base = new URL(publicBaseUrl);
   if (!['http:', 'https:'].includes(base.protocol)) throw Error('Invalid PUBLIC_BASE_URL');
   const audioCache = createAudioCache({ maxBytes: cacheMaxBytes, ttlMs: cacheTtlMs });
   const diskCache = createDiskCache({ ...(diskCacheDir ? { directory: diskCacheDir } : {}), ttlMs: diskCacheTtlMs, maxBytes: diskCacheMaxBytes, maxFileBytes: diskCacheMaxFileBytes });
-  const requests = new Map();
   let activeStreams = 0;
-  let dailyBytes = 0;
-  let day = new Date().toISOString().slice(0, 10);
   const refreshCache = new Map();
   const refresh = async (payload) => {
     if (!payload.videoUrl) return null;
@@ -45,13 +39,6 @@ export function createHandler({ secret, apiKey, publicBaseUrl, allowedHosts = DE
       const url = new URL(req.url, base);
       if (url.pathname === '/health' && req.method === 'GET') return send(200, { ok: true, adapters: registry.adapters.map(x => x.id) });
       if (url.pathname === '/api/resolve' && req.method === 'POST') {
-        if (typeof req.headers['x-api-key'] !== 'string' || !safeKey(req.headers['x-api-key'], apiKey)) fail(401, 'Invalid API key');
-        const ip = req.socket.remoteAddress || 'unknown';
-        const now = Date.now(); const state = requests.get(ip) || { count: 0, reset: now + 60000 };
-        if (now > state.reset) { state.count = 0; state.reset = now + 60000; }
-        if (++state.count > 30) fail(429, 'Rate limit exceeded');
-        requests.set(ip, state);
-        if (requests.size > 10000) requests.clear();
         let size = 0; const parts = [];
         for await (const chunk of req) { size += chunk.length; if (size > 8192) fail(413, 'Request too large'); parts.push(chunk); }
         let body; try { body = JSON.parse(Buffer.concat(parts).toString()); } catch { fail(400, 'Invalid JSON'); }
@@ -70,17 +57,13 @@ export function createHandler({ secret, apiKey, publicBaseUrl, allowedHosts = DE
       if (url.pathname.startsWith('/media/') && ['GET', 'HEAD'].includes(req.method)) {
         const token = url.pathname.slice('/media/'.length);
         const source = verify(token, secret);
-        const today = new Date().toISOString().slice(0, 10);
-        if (today !== day) { day = today; dailyBytes = 0; }
-        if (activeStreams >= maxConcurrent) fail(429, 'Too many active streams');
-        if (dailyBytes >= dailyByteLimit) fail(429, 'Daily transfer budget exhausted');
         activeStreams++;
         try {
           if (source.mode === 'parallel' || source.mode === 'cached' || source.mode === 'disk') {
-            return await parallelAudio(req, res, source, { fetcher: mediaFetcher, allowedHosts, maxBytes, threads: parallelThreads, chunkBytes: parallelChunkBytes, cache: source.mode === 'cached' ? audioCache : null, diskCache: source.mode === 'disk' ? diskCache : null, cacheKey: `${source.videoUrl}|${source.quality}|${source.upstreams[0]}`, cacheMaxFileBytes, onBytes: n => { dailyBytes += n; if (dailyBytes > dailyByteLimit) res.destroy(Error('Daily transfer budget exceeded')); } });
+            return await parallelAudio(req, res, source, { fetcher: mediaFetcher, allowedHosts, maxBytes, threads: parallelThreads, chunkBytes: parallelChunkBytes, cache: source.mode === 'cached' ? audioCache : null, diskCache: source.mode === 'disk' ? diskCache : null, cacheKey: `${source.videoUrl}|${source.quality}|${source.upstreams[0]}`, cacheMaxFileBytes, onBytes: () => {} });
           }
           return await proxyAudio(req, res, source, { fetcher: mediaFetcher, allowedHosts, maxBytes,
-            refreshSource: () => refresh(source), onBytes: n => { dailyBytes += n; if (dailyBytes > dailyByteLimit) res.destroy(Error('Daily transfer budget exceeded')); }
+            refreshSource: () => refresh(source), onBytes: () => {}
           });
         } finally { activeStreams--; }
       }
@@ -95,7 +78,7 @@ export function createHandler({ secret, apiKey, publicBaseUrl, allowedHosts = DE
   };
 }
 export function startServer(env = process.env) {
-  const handler = createHandler({ secret: env.TOKEN_SECRET, apiKey: env.API_KEY, publicBaseUrl: env.PUBLIC_BASE_URL, allowedHosts: (env.ALLOWED_UPSTREAM_HOSTS || DEFAULT_HOSTS.join(',')).split(',').map(s => s.trim()).filter(Boolean), maxBytes: Number(env.MAX_TRANSFER_BYTES || 1073741824), maxConcurrent: Number(env.MAX_CONCURRENT_STREAMS || 4), dailyByteLimit: Number(env.DAILY_TRANSFER_BYTES || 2147483648), fallbackEnabled: env.ENABLE_YTDLP === 'true', fallbackHosts: (env.YTDLP_ALLOWED_HOSTS || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean), defaultMode: env.DEFAULT_AUDIO_MODE || 'stream', parallelThreads: Number(env.PARALLEL_THREADS || 8), parallelChunkBytes: Number(env.PARALLEL_CHUNK_BYTES || 524288), cacheMaxBytes: Number(env.CACHE_MAX_BYTES || 67108864), cacheMaxFileBytes: Number(env.CACHE_MAX_FILE_BYTES || 33554432), cacheTtlMs: Number(env.CACHE_TTL_MS || 600000), diskCacheDir: env.DISK_CACHE_DIR, diskCacheTtlMs: Number(env.DISK_CACHE_TTL_MS || 900000), diskCacheMaxBytes: Number(env.DISK_CACHE_MAX_BYTES || 1073741824), diskCacheMaxFileBytes: Number(env.DISK_CACHE_MAX_FILE_BYTES || 268435456) });
+  const handler = createHandler({ secret: env.TOKEN_SECRET, publicBaseUrl: env.PUBLIC_BASE_URL, allowedHosts: (env.ALLOWED_UPSTREAM_HOSTS || DEFAULT_HOSTS.join(',')).split(',').map(s => s.trim()).filter(Boolean), maxBytes: Number(env.MAX_TRANSFER_BYTES || 1073741824), maxConcurrent: Number(env.MAX_CONCURRENT_STREAMS || 4), fallbackEnabled: env.ENABLE_YTDLP === 'true', fallbackHosts: (env.YTDLP_ALLOWED_HOSTS || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean), defaultMode: env.DEFAULT_AUDIO_MODE || 'stream', parallelThreads: Number(env.PARALLEL_THREADS || 8), parallelChunkBytes: Number(env.PARALLEL_CHUNK_BYTES || 524288), cacheMaxBytes: Number(env.CACHE_MAX_BYTES || 67108864), cacheMaxFileBytes: Number(env.CACHE_MAX_FILE_BYTES || 33554432), cacheTtlMs: Number(env.CACHE_TTL_MS || 600000), diskCacheDir: env.DISK_CACHE_DIR, diskCacheTtlMs: Number(env.DISK_CACHE_TTL_MS || 900000), diskCacheMaxBytes: Number(env.DISK_CACHE_MAX_BYTES || 1073741824), diskCacheMaxFileBytes: Number(env.DISK_CACHE_MAX_FILE_BYTES || 268435456) });
   const votGateway = env.ENABLE_VOT_PROXY === 'true' ? createVotGateway({ yandexApiUrl: env.YANDEX_API_URL, serverId: env.SERVER_ID, maxBodyBytes: Number(env.VOT_MAX_BODY_BYTES || 1048576) }) : null;
   const server = http.createServer((req, res) => {
     if (req.url && new URL(req.url, 'http://localhost').pathname.startsWith('/vot/')) {
