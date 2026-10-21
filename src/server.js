@@ -1,4 +1,5 @@
 import { createVotGateway } from './vot-gateway.js';
+import { prepareMediaTranslation } from './media-translation.js';
 import http from 'node:http';
 import { Registry } from './core/registry.js';
 import { bilibili } from './adapters/bilibili.js';
@@ -80,8 +81,45 @@ export function createHandler({ secret, publicBaseUrl, allowedHosts = DEFAULT_HO
 export function startServer(env = process.env) {
   const handler = createHandler({ secret: env.TOKEN_SECRET, publicBaseUrl: env.PUBLIC_BASE_URL, allowedHosts: (env.ALLOWED_UPSTREAM_HOSTS || DEFAULT_HOSTS.join(',')).split(',').map(s => s.trim()).filter(Boolean), maxBytes: Number(env.MAX_TRANSFER_BYTES || 1073741824), maxConcurrent: Number(env.MAX_CONCURRENT_STREAMS || 4), fallbackEnabled: env.ENABLE_YTDLP === 'true', fallbackHosts: (env.YTDLP_ALLOWED_HOSTS || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean), defaultMode: env.DEFAULT_AUDIO_MODE || 'stream', parallelThreads: Number(env.PARALLEL_THREADS || 8), parallelChunkBytes: Number(env.PARALLEL_CHUNK_BYTES || 524288), cacheMaxBytes: Number(env.CACHE_MAX_BYTES || 67108864), cacheMaxFileBytes: Number(env.CACHE_MAX_FILE_BYTES || 33554432), cacheTtlMs: Number(env.CACHE_TTL_MS || 600000), diskCacheDir: env.DISK_CACHE_DIR, diskCacheTtlMs: Number(env.DISK_CACHE_TTL_MS || 900000), diskCacheMaxBytes: Number(env.DISK_CACHE_MAX_BYTES || 1073741824), diskCacheMaxFileBytes: Number(env.DISK_CACHE_MAX_FILE_BYTES || 268435456) });
   const votGateway = env.ENABLE_VOT_PROXY === 'true' ? createVotGateway({ yandexApiUrl: env.YANDEX_API_URL, serverId: env.SERVER_ID, maxBodyBytes: Number(env.VOT_MAX_BODY_BYTES || 1048576) }) : null;
-  const server = http.createServer((req, res) => {
-    if (req.url && (() => { const p = new URL(req.url, 'http://localhost').pathname; return p.startsWith('/vot/') || p === '/session/create' || p.startsWith('/video-translation/') || p.startsWith('/video-subtitles/') || p.startsWith('/stream-translation/'); })()) {
+  const server = http.createServer(async (req, res) => {
+    const p = new URL(req.url || '/', 'http://localhost').pathname;
+    if (p.startsWith('/vot/')) {
+      if (!votGateway) { res.writeHead(404); return res.end(); }
+      return votGateway(req, res);
+    }
+    if (p === '/video-translation/translate' && req.method === 'POST') {
+      if (!votGateway) { res.writeHead(503); return res.end('VOT gateway disabled'); }
+      try {
+        const chunks = []; let size = 0;
+        for await (const chunk of req) { size += chunk.length; if (size > 1048576) throw Error('Translation request too large'); chunks.push(chunk); }
+        const original = Buffer.concat(chunks);
+        const prepared = await prepareMediaTranslation(original, {
+          publicBaseUrl: env.PUBLIC_BASE_URL, secret: env.TOKEN_SECRET,
+          allowedHosts: (env.ALLOWED_UPSTREAM_HOSTS || DEFAULT_HOSTS.join(',')).split(',').map(s => s.trim()).filter(Boolean),
+          download: async mediaUrl => {
+            // Fetch through the local HTTP listener, not through public DNS.
+            const local = new URL(mediaUrl); local.protocol = 'http:'; local.hostname = '127.0.0.1'; local.port = String(server.address().port);
+            const response = await fetch(local, { signal: AbortSignal.timeout(180000) });
+            if (!response.ok) throw Error(`Audio download HTTP ${response.status}`);
+            let bytes = 0;
+            for await (const chunk of response.body) { bytes += chunk.length; if (bytes > 268435456) throw Error('Audio exceeds prefetch limit'); }
+            if (!bytes) throw Error('Empty audio');
+            console.log('[MEDIA MODE] audio cached', bytes);
+          }
+        });
+        console.log('[MEDIA MODE] audio URL substituted in translation request');
+        const { Readable } = await import('node:stream');
+        const forwarded = Readable.from([prepared.body]);
+        forwarded.method = req.method; forwarded.url = req.url;
+        forwarded.headers = { ...req.headers, 'content-length': String(prepared.body.length) };
+        return votGateway(forwarded, res);
+      } catch (error) {
+        console.error('[MEDIA MODE]', error.message);
+        if (!res.headersSent) { res.writeHead(422, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Media translation preparation failed', detail: error.message })); }
+        return;
+      }
+    }
+    if (p === '/session/create' || p.startsWith('/video-translation/') || p.startsWith('/video-subtitles/') || p.startsWith('/stream-translation/')) {
       if (!votGateway) { res.writeHead(404); return res.end(); }
       return votGateway(req, res);
     }
