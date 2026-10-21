@@ -28,3 +28,14 @@ test('VOT metadata route reaches worker instead of returning 404', async () => {
    assert.match(await response.text(), /Invalid metadata/);
  } finally { await new Promise(resolve => server.close(resolve)); }
 });
+
+
+test('VOT gateway accepts direct session/create path without /vot prefix', async () => {
+ const server = http.createServer(createVotGateway());
+ await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+ try {
+   const base = `http://127.0.0.1:${server.address().port}`;
+   const response = await fetch(base + '/session/create', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+   assert.notEqual(response.status, 404);
+ } finally { await new Promise(resolve => server.close(resolve)); }
+});
