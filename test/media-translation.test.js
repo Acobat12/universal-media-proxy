@@ -16,3 +16,15 @@ test('leaves unrelated protobuf payload unchanged', () => {
  const input = field(Buffer.from('hello'));
  assert.deepEqual(rewriteBilibiliUrls(input,'https://proxy.example/media').bytes,input);
 });
+import { rewriteEnvelopeMedia } from '../src/media-translation.js';
+const f = (tag, data) => Buffer.concat([Buffer.from([tag, data.length]), data]);
+test('VOT envelope rewrite preserves headers and path while rewriting inner URL', () => {
+ const url = 'https://www.bilibili.com/video/BV18b411q7Fb/';
+ const payload = f(10, Buffer.from(url));
+ const envelope = Buffer.concat([f(10, f(10, Buffer.from('x'))), f(18, payload), f(26, Buffer.from('/video-translation/translate'))]);
+ const result = rewriteEnvelopeMedia(envelope, 'https://media.example/media/token');
+ assert.deepEqual(result.urls, [url]);
+ assert.match(result.bytes.toString(), /media.example\/media\/token/);
+ assert.match(result.bytes.toString(), /video-translation\/translate/);
+ assert.doesNotMatch(result.bytes.toString(), /bilibili.com/);
+});
