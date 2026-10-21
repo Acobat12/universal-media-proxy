@@ -86,21 +86,27 @@ export function rewriteEnvelopeMedia(body, replacement, expectedPath = '/video-t
   if (path !== expectedPath || bodyCount !== 1) throw Error('Unexpected VOT envelope path or body');
   return { bytes: Buffer.concat(chunks), urls, sourceVideoUrl };
 }
-export async function prepareMediaTranslation(body, { publicBaseUrl, secret, fetcher = fetch, allowedHosts, download }) {
-  // Discover URL first; do not mutate the signed request until media is available.
-  const isEnvelope = true; // The VOT custom/UMP client uses application/x-vot-envelope+protobuf.
-  const rewrite = (replacement) => rewriteEnvelopeMedia(body, replacement);
-  const found = rewrite('https://placeholder.invalid/media');
+export function canonicalBilibiliVideo(value) {
+  if (!isBilibili(value)) throw Error('Invalid Bilibili video URL');
+  const u = new URL(value);
+  const match = u.pathname.match(/\/video\/(BV[A-Za-z0-9]+)(?:\/|$)/i);
+  const raw = u.searchParams.get('p') || '1';
+  const page = Number(raw);
+  if (!/^[1-9]\d*$/.test(raw) || !Number.isSafeInteger(page) || page > 1000) throw Error('Invalid Bilibili part');
+  return { bvid: match[1], page, sourceUrl: `https://www.bilibili.com/video/${match[1]}/?p=${page}` };
+}
+export function stableMediaUrl(videoUrl, publicBaseUrl) {
+  const { bvid, page } = canonicalBilibiliVideo(videoUrl);
+  return new URL(`/media/bilibili/${bvid}/p${page}/audio.m4a`, publicBaseUrl).href;
+}
+export async function prepareMediaTranslation(body, { publicBaseUrl }) {
+  // No network call here. Media is fetched only if the stable URL is requested.
+  const found = rewriteEnvelopeMedia(body, 'https://placeholder.invalid/media');
   const unique = [...new Set(found.urls)];
   const videoUrl = found.sourceVideoUrl || (unique.length === 1 ? unique[0] : null);
   if (!videoUrl) throw Error(`Missing Bilibili source URL (protobuf matches: ${unique.length}); update VOT client`);
-  if (unique.length && (unique.length !== 1 || unique[0] !== videoUrl)) throw Error("Conflicting Bilibili URLs in request");
-  if (!unique.length) throw Error("Bilibili URL received as metadata, but Yandex protobuf has no replaceable URL; cannot safely substitute audio URL or recalculate signature");
-  const source = await extractAudio(new URL(videoUrl), { registry, fetcher, quality: 'best', signal: AbortSignal.timeout(20000) });
-  for (const candidate of source.upstreams) await assertPublicUrl(candidate, allowedHosts);
-  const exp = Date.now() + 900000;
-  const token = sign({ site: source.site, videoUrl, quality: 'best', upstreams: source.upstreams, headers: source.headers, contentType: source.contentType, mode: 'disk', exp }, secret);
-  const mediaUrl = new URL(`/media/${token}`, publicBaseUrl).href;
-  await download(mediaUrl); // Must finish download before sending the URL to Yandex.
-  return { body: rewrite(mediaUrl).bytes, mediaUrl };
+  if (unique.length && (unique.length !== 1 || unique[0] !== videoUrl)) throw Error('Conflicting Bilibili URLs in request');
+  const mediaUrl = stableMediaUrl(videoUrl, publicBaseUrl);
+  if (!unique.length) throw Error('Bilibili URL supplied as metadata, but the signed Yandex protobuf contains no replaceable URL; cannot substitute media URL without changing the signing flow');
+  return { body: rewriteEnvelopeMedia(body, mediaUrl).bytes, mediaUrl };
 }

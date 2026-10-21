@@ -22,6 +22,7 @@ export function createHandler({ secret, publicBaseUrl, allowedHosts = DEFAULT_HO
   const audioCache = createAudioCache({ maxBytes: cacheMaxBytes, ttlMs: cacheTtlMs });
   const diskCache = createDiskCache({ ...(diskCacheDir ? { directory: diskCacheDir } : {}), ttlMs: diskCacheTtlMs, maxBytes: diskCacheMaxBytes, maxFileBytes: diskCacheMaxFileBytes });
   let activeStreams = 0;
+  const stableResolveJobs = new Map();
   const refreshCache = new Map();
   const refresh = async (payload) => {
     if (!payload.videoUrl) return null;
@@ -54,6 +55,32 @@ export function createHandler({ secret, publicBaseUrl, allowedHosts = DEFAULT_HO
         const exp = Date.now() + ttlSeconds * 1000;
         const token = sign({ site: source.site, videoUrl: target.href, quality, upstreams: source.upstreams, headers: source.headers, contentType: source.contentType, mode, exp }, secret);
         return send(200, { site: source.site, id: source.id, metadata: source.metadata, mode, expiresAt: new Date(exp).toISOString(), mediaUrl: new URL(`/media/${token}`, base).href });
+      }
+      const stable = /^\/media\/bilibili\/(BV[A-Za-z0-9]+)\/p([1-9]\d*)\/audio\.m4a$/.exec(url.pathname);
+      if (stable && ['GET', 'HEAD'].includes(req.method)) {
+        const page = Number(stable[2]);
+        if (!Number.isSafeInteger(page) || page > 1000) fail(400, 'Invalid Bilibili part');
+        const videoUrl = `https://www.bilibili.com/video/${stable[1]}/?p=${page}`;
+        const key = `${stable[1]}:p${page}`;
+        // Only the first media request resolves the Bilibili source; concurrent
+        // requests share the same resolution promise, not duplicate API calls.
+        let job = stableResolveJobs.get(key);
+        if (!job) {
+          job = extractAudio(new URL(videoUrl), { registry, fetcher, quality: 'best', signal: AbortSignal.timeout(20000), fallbackEnabled, fallbackHosts, ytdlp })
+            .then(async source => {
+              for (const candidate of source.upstreams) await assertPublicUrl(candidate, allowedHosts);
+              return { ...source, videoUrl, quality: 'best', mode: 'disk' };
+            });
+          stableResolveJobs.set(key, job);
+          job.finally(() => { if (stableResolveJobs.get(key) === job) stableResolveJobs.delete(key); }).catch(() => {});
+        }
+        const source = await job;
+        activeStreams++;
+        try {
+          // Stream the upstream response immediately; do not wait for a full download.
+          return await proxyAudio(req, res, source, { fetcher: mediaFetcher, allowedHosts, maxBytes,
+            refreshSource: () => refresh(source), onBytes: () => {} });
+        } finally { activeStreams--; }
       }
       if (url.pathname.startsWith('/media/') && ['GET', 'HEAD'].includes(req.method)) {
         const token = url.pathname.slice('/media/'.length);
@@ -97,20 +124,7 @@ export function startServer(env = process.env) {
         if (!['application/x-vot-envelope+protobuf', 'application/x-protobuf', 'application/octet-stream'].includes(contentType)) throw Error(`Unsupported media request Content-Type: ${contentType}`);
         // VOT's inherited request() can overwrite the envelope Content-Type.
         // The envelope parser below validates the wire structure regardless of header.
-        const prepared = await prepareMediaTranslation(original, {
-          publicBaseUrl: env.PUBLIC_BASE_URL, secret: env.TOKEN_SECRET,
-          allowedHosts: (env.ALLOWED_UPSTREAM_HOSTS || DEFAULT_HOSTS.join(',')).split(',').map(s => s.trim()).filter(Boolean),
-          download: async mediaUrl => {
-            // Fetch through the local HTTP listener, not through public DNS.
-            const local = new URL(mediaUrl); local.protocol = 'http:'; local.hostname = '127.0.0.1'; local.port = String(server.address().port);
-            const response = await fetch(local, { signal: AbortSignal.timeout(180000) });
-            if (!response.ok) throw Error(`Audio download HTTP ${response.status}`);
-            let bytes = 0;
-            for await (const chunk of response.body) { bytes += chunk.length; if (bytes > 268435456) throw Error('Audio exceeds prefetch limit'); }
-            if (!bytes) throw Error('Empty audio');
-            console.log('[MEDIA MODE] audio cached', bytes);
-          }
-        });
+        const prepared = await prepareMediaTranslation(original, { publicBaseUrl: env.PUBLIC_BASE_URL });
         console.log('[MEDIA MODE] audio URL substituted in translation request');
         const { Readable } = await import('node:stream');
         const forwarded = Readable.from([prepared.body]);

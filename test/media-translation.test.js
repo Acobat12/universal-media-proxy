@@ -37,3 +37,16 @@ test('VOT envelope carries Bilibili source metadata independently of signed body
  assert.deepEqual(result.urls, []);
  assert.deepEqual(result.bytes, envelope);
 });
+import { stableMediaUrl, prepareMediaTranslation } from '../src/media-translation.js';
+test('stable URLs distinguish Bilibili parts and ignore tracking parameters', () => {
+ const a = stableMediaUrl('https://www.bilibili.com/zh-Hans/video/BV18b411q7Fb/?p=2&vd_source=abc','https://media-proxy.mooo.com');
+ const b = stableMediaUrl('https://www.bilibili.com/video/BV18b411q7Fb/?spm_id_from=x&p=2','https://media-proxy.mooo.com');
+ const c = stableMediaUrl('https://www.bilibili.com/video/BV18b411q7Fb/?p=4','https://media-proxy.mooo.com');
+ assert.equal(a,b); assert.notEqual(a,c);
+ assert.equal(a,'https://media-proxy.mooo.com/media/bilibili/BV18b411q7Fb/p2/audio.m4a');
+});
+test('media preparation does not download and rejects metadata-only signed body', async () => {
+ const url = 'https://www.bilibili.com/video/BV18b411q7Fb/?p=2';
+ const envelope = Buffer.concat([f(18,f(10,Buffer.from('opaque'))),f(26,Buffer.from('/video-translation/translate')),f(34,Buffer.from(url))]);
+ await assert.rejects(prepareMediaTranslation(envelope,{publicBaseUrl:'https://media-proxy.mooo.com'}), /signed Yandex protobuf/);
+});
