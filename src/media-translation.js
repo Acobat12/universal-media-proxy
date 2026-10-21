@@ -24,7 +24,7 @@ function varint(n) {
   return Buffer.from(out);
 }
 const isBilibili = value => {
-  try { const u = new URL(value); return u.protocol === 'https:' && /^(?:www\.)?bilibili\.com$/.test(u.hostname) && /^\/video\/BV[A-Za-z0-9]+\//.test(u.pathname + '/'); }
+  try { const u = new URL(value); return u.protocol === 'https:' && /^(?:www\.)?bilibili\.com$/.test(u.hostname) && /^\/(?:[a-z]{2}(?:-[A-Za-z]{2,8})?\/)?video\/BV[A-Za-z0-9]+(?:\/|$)/i.test(u.pathname); }
   catch { return false; }
 };
 // Walk protobuf wire fields, including nested messages. Preserve unknown fields byte-for-byte.

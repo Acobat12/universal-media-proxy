@@ -94,7 +94,9 @@ export function startServer(env = process.env) {
         for await (const chunk of req) { size += chunk.length; if (size > 1048576) throw Error('Translation request too large'); chunks.push(chunk); }
         const original = Buffer.concat(chunks);
         const contentType = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
-        if (contentType !== 'application/x-vot-envelope+protobuf') throw Error('Media Proxy expects VOT protobuf envelope');
+        if (!['application/x-vot-envelope+protobuf', 'application/x-protobuf', 'application/octet-stream'].includes(contentType)) throw Error(`Unsupported media request Content-Type: ${contentType}`);
+        // VOT's inherited request() can overwrite the envelope Content-Type.
+        // The envelope parser below validates the wire structure regardless of header.
         const prepared = await prepareMediaTranslation(original, {
           publicBaseUrl: env.PUBLIC_BASE_URL, secret: env.TOKEN_SECRET,
           allowedHosts: (env.ALLOWED_UPSTREAM_HOSTS || DEFAULT_HOSTS.join(',')).split(',').map(s => s.trim()).filter(Boolean),
