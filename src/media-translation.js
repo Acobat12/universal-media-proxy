@@ -59,17 +59,22 @@ export function rewriteBilibiliUrls(buffer, replacement, depth = 0) {
 // The browser VOT client sends a protobuf envelope (headers=1, body=2, path=3).
 // Rewrite only field 2; never confuse header strings with the translation payload.
 export function rewriteEnvelopeMedia(body, replacement, expectedPath = '/video-translation/translate') {
-  let pos = 0, path = null, bodyCount = 0;
+  let pos = 0, path = null, bodyCount = 0, sourceVideoUrl = null;
   const chunks = [], urls = [];
   while (pos < body.length) {
     const start = pos;
     const [tag, afterTag] = readVarint(body, pos);
-    if ((tag & 7) !== 2 || ![1, 2, 3].includes(tag >>> 3)) throw Error('Invalid VOT envelope');
+    if ((tag & 7) !== 2 || ![1, 2, 3, 4].includes(tag >>> 3)) throw Error('Invalid VOT envelope');
     const [length, dataStart] = readVarint(body, afterTag);
     const end = dataStart + length;
     if (end > body.length) throw Error('Truncated VOT envelope');
     const field = tag >>> 3;
     if (field === 3) path = utf8.decode(body.subarray(dataStart, end));
+    if (field === 4) {
+      if (sourceVideoUrl !== null) throw Error("Duplicate source video URL");
+      sourceVideoUrl = utf8.decode(body.subarray(dataStart, end));
+      if (!isBilibili(sourceVideoUrl)) throw Error("Invalid Bilibili source URL");
+    }
     if (field === 2) {
       bodyCount++;
       const rewritten = rewriteBilibiliUrls(body.subarray(dataStart, end), replacement);
@@ -79,7 +84,7 @@ export function rewriteEnvelopeMedia(body, replacement, expectedPath = '/video-t
     pos = end;
   }
   if (path !== expectedPath || bodyCount !== 1) throw Error('Unexpected VOT envelope path or body');
-  return { bytes: Buffer.concat(chunks), urls };
+  return { bytes: Buffer.concat(chunks), urls, sourceVideoUrl };
 }
 export async function prepareMediaTranslation(body, { publicBaseUrl, secret, fetcher = fetch, allowedHosts, download }) {
   // Discover URL first; do not mutate the signed request until media is available.
@@ -87,8 +92,10 @@ export async function prepareMediaTranslation(body, { publicBaseUrl, secret, fet
   const rewrite = (replacement) => rewriteEnvelopeMedia(body, replacement);
   const found = rewrite('https://placeholder.invalid/media');
   const unique = [...new Set(found.urls)];
-  if (unique.length !== 1) throw Error(`Expected exactly one Bilibili URL in translation protobuf; found ${unique.length}`);
-  const videoUrl = unique[0];
+  const videoUrl = found.sourceVideoUrl || (unique.length === 1 ? unique[0] : null);
+  if (!videoUrl) throw Error(`Missing Bilibili source URL (protobuf matches: ${unique.length}); update VOT client`);
+  if (unique.length && (unique.length !== 1 || unique[0] !== videoUrl)) throw Error("Conflicting Bilibili URLs in request");
+  if (!unique.length) throw Error("Bilibili URL received as metadata, but Yandex protobuf has no replaceable URL; cannot safely substitute audio URL or recalculate signature");
   const source = await extractAudio(new URL(videoUrl), { registry, fetcher, quality: 'best', signal: AbortSignal.timeout(20000) });
   for (const candidate of source.upstreams) await assertPublicUrl(candidate, allowedHosts);
   const exp = Date.now() + 900000;

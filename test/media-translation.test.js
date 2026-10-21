@@ -28,3 +28,12 @@ test('VOT envelope rewrite preserves headers and path while rewriting inner URL'
  assert.match(result.bytes.toString(), /video-translation\/translate/);
  assert.doesNotMatch(result.bytes.toString(), /bilibili.com/);
 });
+
+test('VOT envelope carries Bilibili source metadata independently of signed body', () => {
+ const url = 'https://www.bilibili.com/video/BV18b411q7Fb/';
+ const envelope = Buffer.concat([f(18, f(10, Buffer.from('opaque'))), f(26, Buffer.from('/video-translation/translate')), f(34, Buffer.from(url))]);
+ const result = rewriteEnvelopeMedia(envelope, 'https://media.example/media/token');
+ assert.equal(result.sourceVideoUrl, url);
+ assert.deepEqual(result.urls, []);
+ assert.deepEqual(result.bytes, envelope);
+});
