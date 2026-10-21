@@ -293,7 +293,32 @@ async function makeRequest(request) {
 
       if (type === "text/plain") {
 
-        console.log("[VOT DEBUG] upstream text/plain error (body omitted for privacy)");
+        // Never print the upstream body: it may contain session tokens or identifiers.
+        // Record only its length, hash and a tightly controlled diagnostic category.
+        try {
+          const bytes = new Uint8Array(await upstream.clone().arrayBuffer());
+          const { createHash } = await import("node:crypto");
+          const text = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+          const category = /(?:payment|required.to.pay|subscription|quota|billing)/i.test(text)
+            ? "payment-or-quota"
+            : /(?:signature|invalid.sign|bad.sign)/i.test(text)
+              ? "signature"
+              : /(?:unauthorized|authorization|invalid.token|expired.token|forbidden)/i.test(text)
+                ? "authorization"
+                : /(?:rate.limit|too.many.requests|throttl)/i.test(text)
+                  ? "rate-limit"
+                  : /(?:captcha|robot|blocked|denied)/i.test(text)
+                    ? "access-denied"
+                    : "unclassified";
+          console.log("[VOT DEBUG] upstream text/plain diagnostic", JSON.stringify({
+            status: upstream.status,
+            bytes: bytes.byteLength,
+            sha256: createHash("sha256").update(bytes).digest("hex"),
+            category
+          }));
+        } catch (diagnosticError) {
+          console.log("[VOT DEBUG] upstream text/plain inspection failed", String(diagnosticError));
+        }
 
       }
 

@@ -110,6 +110,12 @@ export function startServer(env = process.env) {
   const votGateway = env.ENABLE_VOT_PROXY === 'true' ? createVotGateway({ yandexApiUrl: env.YANDEX_API_URL, serverId: env.SERVER_ID, maxBodyBytes: Number(env.VOT_MAX_BODY_BYTES || 1048576) }) : null;
   const server = http.createServer(async (req, res) => {
     const p = new URL(req.url || '/', 'http://localhost').pathname;
+    if (req.method === 'POST' && p.endsWith('/video-translation/translate')) {
+      console.log('[ROUTE DEBUG]', JSON.stringify({
+        originalPath: p,
+        route: p.startsWith('/vot/') ? 'direct-vot' : p === '/video-translation/translate' ? 'media-translation' : 'unknown'
+      }));
+    }
     if (p.startsWith('/vot/')) {
       if (!votGateway) { res.writeHead(404); return res.end(); }
       return votGateway(req, res);
