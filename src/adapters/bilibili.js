@@ -24,11 +24,11 @@ export const bilibili = {
     const p = Number(u.searchParams.get('p') || '1');
     if (!Number.isSafeInteger(p) || p < 1 || p > 1000) fail(400, 'Invalid page number');
     if (!['best','medium','lowest'].includes(quality)) fail(400, 'Invalid audio quality');
-    const view = await json(`${API}/x/web-interface/view?bvid=${encodeURIComponent(bvid)}`, fetcher, signal);
-    const cid = view.pages?.[p - 1]?.cid;
+    const view = await json(`${API}/x/player/pagelist?bvid=${encodeURIComponent(bvid)}`, fetcher, signal);
+    const cid = view?.[p - 1]?.cid;
     if (!Number.isSafeInteger(cid) || cid <= 0) fail(404, 'Video part not found');
     // WBI endpoint: may require signing or account access for some videos.
-    const play = await json(`${API}/x/player/playurl?bvid=${encodeURIComponent(bvid)}&cid=${cid}&fnval=16`, fetcher, signal);
+    const play = await json(`${API}/x/player/wbi/playurl?bvid=${encodeURIComponent(bvid)}&cid=${cid}&fnval=16`, fetcher, signal);
     const tracks = (play.dash?.audio || []).filter(a => a.baseUrl || a.base_url).sort((a,b) => (b.bandwidth || 0) - (a.bandwidth || 0));
     if (!tracks.length) fail(422, 'No DASH audio track (region/login/WBI may be required)');
     const index = quality === 'lowest' ? tracks.length - 1 : quality === 'medium' ? Math.floor((tracks.length - 1) / 2) : 0;
