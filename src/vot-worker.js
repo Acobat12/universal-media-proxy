@@ -1,3 +1,4 @@
+import { yandexFetch } from "./yandex-transport.js";
 const VERSION = "1.1.14-protobuf-envelope-validated";
 const DIAG_ENABLED = process.env.VOT_DIAGNOSTICS !== "false";
 const diag = (label, details) => { if (DIAG_ENABLED) console.log(label, JSON.stringify(details)); };
@@ -231,7 +232,7 @@ async function makeRequest(request) {
 
     await logYandexRequest(request);
     const startedAt = performance.now();
-    upstream = await fetch(request);
+    upstream = await yandexFetch(request);
     diag("[VOT UPSTREAM]", {path: new URL(request.url).pathname, status: upstream.status, elapsedMs: Math.round(performance.now() - startedAt), responseHeaderNames: Array.from(upstream.headers.keys()).sort(), contentType: upstream.headers.get("content-type"), contentLength: upstream.headers.get("content-length"), contentEncoding: upstream.headers.get("content-encoding") ?? "none"});
 
     console.log(
