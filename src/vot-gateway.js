@@ -16,6 +16,7 @@ export function createVotGateway({ yandexApiUrl, serverId, maxBodyBytes = 104857
         ? '/vot/metadata'
         : incoming.pathname.startsWith('/vot/') ? incoming.pathname.slice('/vot'.length) : incoming.pathname;
       if (!allowedPaths.some(p => path === p || (p.endsWith('/') && path.startsWith(p)))) { res.writeHead(404); return res.end(); }
+      if (process.env.VOT_DIAGNOSTICS !== "false") console.log("[VOT ROUTE]", JSON.stringify({originalPath: incoming.pathname, gatewayPath: path, mode: incoming.pathname.startsWith("/vot/") ? "direct-vot" : "root-or-media", method: req.method}));
       const headers = new Headers();
       for (const [name, value] of Object.entries(req.headers)) if (value != null && !['host','connection','transfer-encoding','content-length'].includes(name)) headers.set(name, Array.isArray(value) ? value.join(', ') : value);
       const hasBody = !['GET','HEAD'].includes(req.method);

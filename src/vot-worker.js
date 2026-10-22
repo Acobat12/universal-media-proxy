@@ -1,4 +1,7 @@
 const VERSION = "1.1.14-protobuf-envelope-validated";
+const DIAG_ENABLED = process.env.VOT_DIAGNOSTICS !== "false";
+const diag = (label, details) => { if (DIAG_ENABLED) console.log(label, JSON.stringify(details)); };
+const hexSHA256 = async bytes => Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)), b => b.toString(16).padStart(2, "0")).join("");
 
 const YANDEX_USER_AGENT =
 
@@ -175,21 +178,15 @@ async function logYandexRequest(request) {
 
   const url = new URL(request.url);
 
-  if (url.pathname !== "/video-translation/translate") return;
+  if (!["/video-translation/translate", "/session/create", "/video-translation/cache"].includes(url.pathname)) return;
 
   try {
 
     const body = await request.clone().arrayBuffer();
 
-    const digest = await crypto.subtle.digest("SHA-256", body);
+    const sha256 = await hexSHA256(body);
 
-    const sha256 = Array.from(new Uint8Array(digest), byte =>
-
-      byte.toString(16).padStart(2, "0")
-
-    ).join("");
-
-    console.log("[VOT DEBUG] outgoing", JSON.stringify({
+    diag("[VOT DEBUG] outgoing", {
 
       method: request.method,
 
@@ -211,9 +208,12 @@ async function logYandexRequest(request) {
 
       signatureLength: request.headers.get("vtrans-signature")?.length ?? 0,
 
-      acceptLanguage: request.headers.get("accept-language")
-
-    }));
+      acceptLanguage: request.headers.get("accept-language"),
+      headerCount: Array.from(request.headers.keys()).length,
+      authorizationPresent: request.headers.has("authorization"),
+      secVtransSkPresent: request.headers.has("sec-vtrans-sk"),
+      secVtransTokenPresent: request.headers.has("sec-vtrans-token")
+    });
 
   } catch (error) {
 
@@ -230,8 +230,9 @@ async function makeRequest(request) {
   try {
 
     await logYandexRequest(request);
-
+    const startedAt = performance.now();
     upstream = await fetch(request);
+    diag("[VOT UPSTREAM]", {path: new URL(request.url).pathname, status: upstream.status, elapsedMs: Math.round(performance.now() - startedAt), responseHeaderNames: Array.from(upstream.headers.keys()).sort(), contentType: upstream.headers.get("content-type"), contentLength: upstream.headers.get("content-length"), contentEncoding: upstream.headers.get("content-encoding") ?? "none"});
 
     console.log(
 
@@ -257,7 +258,7 @@ async function makeRequest(request) {
 
         const responseBytes = new Uint8Array(await upstream.clone().arrayBuffer());
 
-        console.log("[VOT RESPONSE]", JSON.stringify({
+        diag("[VOT RESPONSE]", {
 
           path: responsePath,
 
@@ -273,11 +274,10 @@ async function makeRequest(request) {
 
           empty: responseBytes.byteLength === 0,
 
-          firstWireType: responseBytes.byteLength ? (responseBytes[0] & 7) : null,
-
-          firstFieldNumber: responseBytes.byteLength ? (responseBytes[0] >>> 3) : null
-
-        }));
+          firstFieldNumber: responseBytes.byteLength && mediaTypeOf(upstream.headers.get("content-type")) === PROTOBUF_MEDIA_TYPE ? (responseBytes[0] >>> 3) : null,
+          firstWireType: responseBytes.byteLength && mediaTypeOf(upstream.headers.get("content-type")) === PROTOBUF_MEDIA_TYPE ? (responseBytes[0] & 7) : null,
+          bodySHA256: await hexSHA256(responseBytes)
+        });
 
       } catch (diagnosticError) {
 
@@ -477,7 +477,7 @@ async function handleEnvelopeRequest(request, pathname, yandexApiUrl) {
   const headers = safeUpstreamHeaders(cleanHeaders);
   headers.set("Content-Type", PROTOBUF_MEDIA_TYPE);
   if (!headers.has("user-agent")) headers.set("User-Agent", YANDEX_USER_AGENT);
-  console.log("[VOT ENVELOPE]", JSON.stringify({path: pathname, envelopeBytes: payload.length, bodyBytes: envelope.body.length, headerCount: Object.keys(envelope.headers).length, viaRestored: restored !== null}));
+  diag("[VOT ENVELOPE]", {path: pathname, envelopeBytes: payload.length, envelopeSHA256: await hexSHA256(payload), bodyBytes: envelope.body.length, bodySHA256: await hexSHA256(envelope.body), headerCount: Object.keys(envelope.headers).length, viaRestored: restored !== null, headerNames: Object.keys(envelope.headers).sort()});
   return makeRequest(new Request(yandexRequestUrl(yandexApiUrl, pathname), {method: request.method, headers, body: envelope.body}));
 }
 
@@ -604,7 +604,7 @@ const route = {
 
     const yandexApiUrl = normalizeYandexApiUrl(env?.YANDEX_API_URL);
 
-    console.log("[VOT] incoming", request.method, new URL(request.url).pathname, mediaTypeOf(request.headers.get("content-type")));
+    diag("[VOT] incoming", {method: request.method, path: new URL(request.url).pathname, contentType: mediaTypeOf(request.headers.get("content-type")), contentLength: request.headers.get("content-length"), transport: mediaTypeOf(request.headers.get("content-type")) === ENVELOPE_MEDIA_TYPE ? "protobuf-envelope" : "other"});
 
     if (request.method == "OPTIONS")
 
