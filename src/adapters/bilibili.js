@@ -1,7 +1,13 @@
 import { fail } from '../core/errors.js';
 const SITE = ['www.bilibili.com', 'bilibili.com'];
 const API = 'https://api.bilibili.com';
-const HEADERS = { 'User-Agent': 'Mozilla/5.0', Referer: 'https://www.bilibili.com/' };
+const HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+  'Referer': 'https://www.bilibili.com/',
+  'Origin': 'https://www.bilibili.com',
+  'Accept': 'application/json, text/plain, */*',
+  'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8'
+};
 function videoId(u) { return u.pathname.match(/^\/(?:[a-z]{2}(?:-[A-Za-z]{2,8})?\/)?video\/(BV[0-9A-Za-z]+)/i)?.[1]; }
 async function json(url, fetcher, signal) {
   const r = await fetcher(url, { headers: HEADERS, signal, redirect: 'manual' });

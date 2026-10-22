@@ -448,6 +448,11 @@ function decodeVotEnvelope(bytes) {
     } else if (field === 3) {
       if (path !== null) throw new Error("Duplicate path");
       path = decoder.decode(bytes.subarray(start, end));
+    } else if (field === 4) {
+      // Optional source URL metadata for the media preparation layer.
+      // Never forward this envelope field to Yandex.
+      const sourceUrl = decoder.decode(bytes.subarray(start, end));
+      if (sourceUrl.length > 2048) throw new Error("Source URL too long");
     } else throw new Error("Unexpected envelope field");
     offset = end;
   }
