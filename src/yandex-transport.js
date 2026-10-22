@@ -1,8 +1,8 @@
-// Optional alternative outbound transports for Yandex. Default retains the original fetch.
+// Outbound transports for Yandex. HTTP/2 is the default; node and curl remain selectable.
 import http2 from 'node:http2';
 import { spawn } from 'node:child_process';
 
-const mode = () => (process.env.VOT_YANDEX_TRANSPORT || 'node').toLowerCase();
+const mode = () => (process.env.VOT_YANDEX_TRANSPORT || 'http2').toLowerCase();
 const timeout = () => Math.max(1000, Number(process.env.VOT_YANDEX_TIMEOUT_MS) || 15000);
 
 function safeHeaderEntries(headers) {
