@@ -19,6 +19,15 @@ async function json(url, fetcher, signal) {
 export const bilibili = {
   id: 'bilibili',
   mediaHosts: ['bilivideo.com', 'bilibili.com', 'hdslb.com'],
+  stableMediaPath(url) {
+    const { bvid, page } = canonicalBilibiliVideo(url.href);
+    return `/media/bilibili/${bvid}/p${page}/audio.m4a`;
+  },
+  async resolveMediaPath(path, context) {
+    const match = /^\/media\/bilibili\/(BV[A-Za-z0-9]+)\/p([1-9]\d{0,3})\/audio\.m4a$/.exec(path);
+    if (!match || Number(match[2]) > 1000) fail(404, 'Invalid Bilibili media path');
+    return this.resolve(new URL(`https://www.bilibili.com/video/${match[1]}/?p=${match[2]}`), context);
+  },
   async prepareMediaTranslation(body, context) {
     // Decline requests for other sites without blocking later adapters.
     // Keep strict validation for requests that actually mention Bilibili.

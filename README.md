@@ -57,7 +57,7 @@ git clone https://github.com/Acobat12/universal-media-proxy.git && cd universal-
 5. **Лимит SSD-кэша** в МиБ, по умолчанию `1024` (1 ГиБ).
 6. Подтверждение установки Node.js и системной службы.
 
-Установщик сам создаст случайный `TOKEN_SECRET`, создаст отдельного системного пользователя, настроит `systemd`, SSD-кэш и при домене — Caddy с автоматическим HTTPS. Секрет будет сохранён в `/etc/universal-media-proxy.env` с правами доступа только для root.
+Установщик создаст отдельного системного пользователя, настроит `systemd`, SSD-кэш и при домене — Caddy с автоматическим HTTPS. Медиа-токены и `TOKEN_SECRET` не используются.
 
 **Важно:** скрипт не настраивает DNS-записи у регистратора и не открывает порты в панели VPS. Сертификат Let's Encrypt выдаётся Caddy при выполнении сетевых условий; успешное выполнение установщика само по себе не гарантирует выдачу сертификата.
 
@@ -100,16 +100,16 @@ curl -X POST 'https://proxy.example.com/api/resolve' \
   -d '{"url":"https://www.bilibili.com/video/BV...","quality":"best","mode":"disk"}'
 ```
 
-Ответ содержит `mediaUrl` — подписанную временную ссылку на аудио. Её можно передать клиенту, который умеет загружать аудио по HTTP(S). Само по себе получение ссылки **не запускает перевод**.
+Ответ содержит `mediaUrl` — постоянный адрес медиа, зависящий от сайта и идентификатора видео. Её можно передать клиенту, который умеет загружать аудио по HTTP(S). Само по себе получение ссылки **не запускает перевод**.
 
 Проверка ссылки (вставьте реальный URL):
 
 ```bash
-curl -I 'https://proxy.example.com/media/ВАШ_ТОКЕН'
-curl -H 'Range: bytes=0-1023' -o first-1k.bin 'https://proxy.example.com/media/ВАШ_ТОКЕН'
+curl -I 'https://proxy.example.com/media/bilibili/BV18b411q7Fb/p1/audio.m4a'
+curl -H 'Range: bytes=0-1023' -o first-1k.bin 'https://proxy.example.com/media/bilibili/BV18b411q7Fb/p1/audio.m4a'
 ```
 
-При частичной выдаче ожидается `206 Partial Content` и корректный `Content-Range`. Ссылки содержат токен доступа: не публикуйте их без необходимости.
+При частичной выдаче ожидается `206 Partial Content` и корректный `Content-Range`. Ссылки не содержат временных токенов. При запросе сервер заново разрешает CDN-адрес.
 
 ## 5. SSD-кэш: 15 минут и автоматическое удаление
 
@@ -140,7 +140,7 @@ PARALLEL_CHUNK_BYTES=524288
         │                                               │
   ① Media Proxy                                  ② VOT API Proxy
   POST /api/resolve                              POST /vot/video-translation/translate
-  GET  /media/<token>                            POST /vot/session/create
+  GET  /media/bilibili/BVID/p1/audio.m4a                            POST /vot/session/create
         │                                               │
         ▼                                               ▼
   Bilibili CDN                                  api.browser.yandex.ru
@@ -190,7 +190,7 @@ POST https://proxy.example.com/vot/video-translation/translate
 | `GET`, `HEAD` | `/vot/video-subtitles/subtitles-proxy/…` | Получение субтитров из хранилища Яндекса |
 | `POST` | `/vot/metadata` | Передача метаданных двухшагового протокола |
 
-**Не путайте** `/media/<token>` (исходное аудио Bilibili, временно лежащее на вашем SSD) с `/vot/video-translation/audio-proxy/…` (аудио **перевода**, которое сервер запрашивает у инфраструктуры Яндекса). 15-минутный SSD-кэш относится к первому случаю, а не ко всем ответам Яндекса.
+**Не путайте** `/media/bilibili/BVID/p1/audio.m4a` (стабильный адрес исходного аудио Bilibili) с `/vot/video-translation/audio-proxy/…` (аудио **перевода**, которое сервер запрашивает у инфраструктуры Яндекса). 15-минутный SSD-кэш относится к первому случаю, а не ко всем ответам Яндекса.
 
 ### 6.3. Как включить VOT API Proxy
 
@@ -324,7 +324,7 @@ sudo systemctl status universal-media-proxy
 
 ## 11. Ограничения и безопасность
 
-- API-ключ защищает `/api/resolve`; подписанный `mediaUrl` может использовать каждый, у кого есть ссылка, пока токен действителен.
+- `/api/resolve` возвращает стабильный адрес медиа, не требующий токена. Публичный сервер следует защищать ограничением запросов на уровне инфраструктуры.
 - Публичные маршруты VOT не требуют API-ключа. Учитывайте риск злоупотреблений: при необходимости ограничивайте доступ, частоту запросов и нагрузку средствами Caddy или сетевой инфраструктуры.
 - Квоты передачи в текущей версии учитываются процессом Node.js и могут сбрасываться при перезапуске.
 - Bilibili может менять API, ограничивать CDN, требовать cookies/WBI-подпись или блокировать IP сервера.
@@ -352,7 +352,7 @@ npm run check
 
 ## Публичный доступ без API-ключей
 
-VOT (`/vot/*`) и Bilibili (`/api/resolve`, `/media/*`) доступны всем без `X-Proxy-Key` и `X-API-Key`. Установщик не создаёт пользовательские API-ключи. `TOKEN_SECRET` — внутренний секрет подписи временных URL `/media`, его нельзя удалять или публиковать. Ограничение частоты запросов `/api/resolve` и суточная квота трафика сняты; остаются технические ограничения размера запроса, размера медиа и параллельных потоков.
+VOT (`/vot/*`) и Bilibili (`/api/resolve`, `/media/*`) доступны всем без `X-Proxy-Key` и `X-API-Key`. Установщик не создаёт пользовательские API-ключи. Временные медиа-токены и `TOKEN_SECRET` полностью удалены. Ограничение частоты запросов `/api/resolve` и суточная квота трафика сняты; остаются технические ограничения размера запроса, размера медиа и параллельных потоков.
 
 ### Актуальный эталон клиента VOT
 
@@ -362,8 +362,14 @@ VOT (`/vot/*`) и Bilibili (`/api/resolve`, `/media/*`) доступны все�
 
 ## Подключение нового сайта одним файлом
 
-Добавьте `src/adapters/имя.js` с `export default` (поля `id`, `matches(url)`, `async resolve(url, context)` и, при необходимости, `mediaHosts: ['cdn.example.com']`) и перезапустите сервер. Новые адаптеры автоматически доступны через `/api/resolve`; список отображается в `/health`. Резервные `.bak` игнорируются. Подробный пример: [`src/adapters/README.md`](src/adapters/README.md). Особые маршруты Bilibili/Douyin остаются отдельной логикой.
+Добавьте `src/adapters/имя.js` с `export default` (поля `id`, `matches(url)`, `async resolve(url, context)` и, при необходимости, `mediaHosts: ['cdn.example.com']`) и перезапустите сервер. Новые адаптеры автоматически загружаются; для работы через `/api/resolve` адаптер также должен реализовать `stableMediaPath()` и `resolveMediaPath()`; список отображается в `/health`. Резервные `.bak` игнорируются. Подробный пример: [`src/adapters/README.md`](src/adapters/README.md). Особые маршруты Bilibili/Douyin остаются отдельной логикой.
 
-## Parallel-first media downloads
+## Параллельная загрузка медиа по умолчанию
 
-Every `/api/resolve` token uses parallel mode regardless of the requested `mode`. Existing stream tokens are also routed through the parallel downloader. If a CDN does not support HTTP byte ranges, the downloader automatically falls back to a single stream. `PARALLEL_THREADS` and `PARALLEL_CHUNK_BYTES` configure concurrency and chunk size. Site-specific Douyin media routes also use parallel-first.
+Для постоянных медиаадресов сервер сначала использует параллельную загрузку независимо от переданного параметра `mode`. Временные медиа-токены не создаются. Если CDN не поддерживает HTTP-запросы диапазонов байтов (Range), загрузчик автоматически переключается на один поток. Переменные `PARALLEL_THREADS` и `PARALLEL_CHUNK_BYTES` задают число параллельных запросов и размер части. Специальные медиа-маршруты Douyin также сначала пытаются использовать параллельную загрузку.
+
+## Постоянные медиаадреса и сохранение перевода
+
+Сервер **не создаёт временные медиа-токены**: модуль `src/core/token.js` и маршрут `/media/<token>` удалены. `POST /api/resolve` возвращает постоянный URL только для адаптеров, поддерживающих `stableMediaPath()` и `resolveMediaPath()`. Bilibili поддерживается; Douyin использует отдельную регистрацию `/api/douyin/register` и `/media/douyin/<awemeId>/audio.mp4`. Регистрация Douyin хранится в памяти и не переживает перезапуск процесса.
+
+Постоянный адрес сам по себе не гарантирует сохранение перевода: VOT/Yandex могут формировать ключ кеша из дополнительных параметров. Для корректной идентификации сохраняйте оригинальный URL видео в VOT. Прокси не хранит готовые переводы Яндекса в своём SSD-кэше.

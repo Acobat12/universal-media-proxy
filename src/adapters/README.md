@@ -1,18 +1,18 @@
-# Adding a website
+# Подключение нового сайта
 
-Add `src/adapters/example.js` (a `.js` file directly in this directory), then restart Node. The loader ignores `.bak` and hidden files. A broken plugin stops startup with an error instead of silently disabling a site.
+Создайте файл `src/adapters/example.js` непосредственно в этой папке и перезапустите Node.js. Загрузчик игнорирует скрытые файлы и файлы `.bak`. Если адаптер содержит ошибку, запуск сервера остановится с сообщением об ошибке: неисправный адаптер не будет незаметно пропущен.
 
 ```js
 export default {
   id: 'example',
-  // Trusted CDN domains required by this adapter; no schemes, paths, or wildcards.
+  // Доверенные домены CDN: без протокола, пути и подстановочных знаков.
   mediaHosts: ['cdn.example.com'],
   matches(url) {
     return url.protocol === 'https:' && url.hostname === 'example.com' && url.pathname.startsWith('/video/');
   },
   async resolve(url, { fetcher, quality, signal }) {
-    // Implement extraction for the real site's documented/public API.
-    // Do not fetch arbitrary user-provided URLs or credentials.
+    // Реализуйте получение медиа через доступный API сайта.
+    // Не запрашивайте произвольные URL и учётные данные пользователя.
     return {
       site: 'example', id: url.pathname.split('/').pop(),
       contentType: 'audio/mp4',
@@ -23,20 +23,35 @@ export default {
 };
 ```
 
-`mediaHosts` are automatically added to the CDN allowlist. Only declare trusted, public domains: all media URLs are still checked for HTTPS and public DNS addresses. Alternatively configure `ALLOWED_UPSTREAM_HOSTS` in the environment. `GET /health` lists loaded adapters.
+Домены из `mediaHosts` автоматически добавляются в список разрешённых CDN. Указывайте только доверенные публичные домены. Медиаадреса дополнительно проверяются: требуется HTTPS, а DNS-адрес не должен указывать на внутреннюю сеть. Вместо `mediaHosts` можно настроить переменную окружения `ALLOWED_UPSTREAM_HOSTS`. Список загруженных адаптеров доступен через `GET /health`.
 
-Note: The generic `/api/resolve` endpoint uses every adapter. Bilibili's protobuf URL rewriting/stable media route and Douyin's browser registration/stable media route remain site-specific. Adding a generic adapter does not automatically enable these special integrations or bypass login/DRM.
+**Важно:** общий маршрут `/api/resolve` использует все зарегистрированные адаптеры. Обработка protobuf и постоянные медиаадреса Bilibili, а также регистрация видео и специальные маршруты Douyin реализованы отдельно в соответствующих адаптерах. Добавление обычного адаптера само по себе не создаёт специальные интеграции и не обходит авторизацию или DRM.
 
-### VOT media translation hook
+### Обработка запросов перевода VOT
 
-An adapter can optionally implement `async prepareMediaTranslation(body, { publicBaseUrl })`.
-Return `{ body, mediaUrl }` when the signed request belongs to the adapter, or `null` if it does not. The core dispatcher checks adapters in descending `mediaTranslationPriority` order (default `0`). Avoid modifying signed request bytes unless the signing flow explicitly supports it.
-Site-specific translation logic belongs in its adapter, not in `src/media-translation.js`.
+Адаптер может дополнительно реализовать `async prepareMediaTranslation(body, { publicBaseUrl })`. Если подписанный запрос относится к этому сайту, метод возвращает `{ body, mediaUrl }`. Если запрос относится к другому сайту, метод возвращает `null`.
 
-### VOT dispatch rules
+Общий диспетчер проверяет адаптеры по убыванию `mediaTranslationPriority` (по умолчанию `0`). Не изменяйте байты подписанного запроса, если используемая схема подписи явно этого не допускает. Логика перевода, зависящая от сайта, должна находиться в адаптере, а не в `src/media-translation.js`.
 
-`prepareMediaTranslation(body, context)` must return `null` for requests belonging to
-other sites. Return `{ body, mediaUrl }` when it handles the request, and throw only
-when a request recognized as belonging to that adapter is malformed. This lets
-additional site adapters participate without editing `media-translation.js`.
-The dispatcher tries higher `mediaTranslationPriority` values first.
+### Правила выбора адаптера для VOT
+
+Метод `prepareMediaTranslation(body, context)` должен возвращать `null` для запросов других сайтов. Возвращайте `{ body, mediaUrl }` при успешной обработке, а ошибку выбрасывайте только тогда, когда запрос точно относится к вашему адаптеру, но имеет неверный формат. Это позволяет подключать дополнительные сайты без изменений `media-translation.js`. Адаптеры с более высоким `mediaTranslationPriority` проверяются первыми.
+
+## Постоянные URL без токенов
+
+Чтобы адаптер работал через `POST /api/resolve` и `GET /media/<site>/...`, добавьте:
+
+```js
+stableMediaPath(url, { quality }) {
+  // Верните постоянный безопасный путь с проверенным идентификатором.
+  return `/media/newsite/${extractAndValidateId(url)}/audio.mp4`;
+},
+async resolveMediaPath(path, { fetcher, signal }) {
+  // Проверьте весь путь и восстановите канонический URL видео
+  // и вызовите this.resolve(...). Никаких URL от клиента для CDN.
+  const id = parseAndValidateMediaPath(path);
+  return this.resolve(new URL(`https://newsite.example/watch/${id}`), { fetcher, signal });
+}
+```
+
+Не используйте случайные токены, временные URL CDN или пользовательские upstream-адреса как постоянные идентификаторы. Bilibili реализует эти методы. Douyin использует собственный маршрут с регистрацией идентификатора видео; регистрация хранится в памяти и требует повторения после перезапуска. Для нового сайта эти методы не добавляются автоматически.
