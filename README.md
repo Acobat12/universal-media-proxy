@@ -348,17 +348,15 @@ npm run check
 
 ### Проверенные изменения для исходников VOT
 
-См. [инструкцию по адаптации VOT](docs/VOT_CODE_CHANGES_RU.md) и [справочный патч](docs/VOT_REFERENCE_CHANGES.patch). **Режим 3 требует Protobuf Envelope; стандартный режим 2 не гарантирует работу с данным сервером.** Публичный VOT API не требует `X-Proxy-Key`.
+См. [инструкцию подключения UMP к VOT](docs/VOT_CODE_CHANGES_RU.md). Для UMP используется Protobuf Envelope. Адрес сервера задаётся в настройках VOT; `src/index.ts` менять не нужно.
 
 ## Публичный доступ без API-ключей
 
 VOT (`/vot/*`) и Bilibili (`/api/resolve`, `/media/*`) доступны всем без `X-Proxy-Key` и `X-API-Key`. Установщик не создаёт пользовательские API-ключи. Временные медиа-токены и `TOKEN_SECRET` полностью удалены. Ограничение частоты запросов `/api/resolve` и суточная квота трафика сняты; остаются технические ограничения размера запроса, размера медиа и параллельных потоков.
 
-### Актуальный эталон клиента VOT
+### Клиент VOT
 
-См. [точный файл `protobufEnvelopeProvider.ts`](docs/reference/protobufEnvelopeProvider.ts), предоставленный для текущего форка VOT, и [инструкцию по интеграции](docs/VOT_CODE_CHANGES_RU.md). Клиент использует `VOTProtobufEnvelopeClient extends VOTClient`, упаковывает тело и разрешённые заголовки в Protobuf Envelope и отправляет `Content-Type: application/x-vot-envelope+protobuf`.
-
-**Адрес UMP:** `https://media-proxy.mooo.com/vot` (внешний префикс `/vot`). **Адрес отдельного Cloudflare Worker:** `https://fork.workers-vot.workers.dev` (без префикса `/vot`). Внутренний путь Envelope не содержит `/vot`. Клиентский файл не заменяет серверные `src/vot-worker.js` и `src/vot-gateway.js`.
+См. [пример `protobufEnvelopeProvider.ts`](docs/reference/protobufEnvelopeProvider.ts) и [настройку адреса сервера](docs/VOT_CODE_CHANGES_RU.md). Для Bilibili укажите собственный UMP-сервер в Helper и в проверке `isCustomLink()`.
 
 ## Подключение нового сайта одним файлом
 
