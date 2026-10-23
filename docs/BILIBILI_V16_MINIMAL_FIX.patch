@@ -1,0 +1,28 @@
+--- a/src/videoHandler/modules/protobufEnvelopeProvider.ts
++++ b/src/videoHandler/modules/protobufEnvelopeProvider.ts
+@@ -43,6 +43,25 @@
+ 
+ // Use the local VOTClient: it preserves session signatures, errors and abort handling.
+ export default class VOTProtobufEnvelopeClient extends VOTClient {
++
++  override isCustomLink(url: string): boolean {
++    const isBilibiliPage =
++      typeof location !== "undefined" &&
++      /(?:^|\.)bilibili\.com$/i.test(location.hostname);
++
++    const isBilibiliMedia =
++      /^https:\/\/media-proxy\.freedynamicdns\.org\/media\/bilibili\//i.test(url);
++
++    if (isBilibiliPage && isBilibiliMedia) {
++      console.info("[FORK][bilibili] forcing protobuf translation path", {
++        url,
++      });
++      return false;
++    }
++
++    return super.isCustomLink(url);
++  }
++
+   override async request<T = ArrayBuffer>(
+     path: string,
+     body: Uint8Array,
