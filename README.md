@@ -351,14 +351,6 @@ npm run check
 
 См. [инструкцию подключения UMP к VOT](docs/VOT_CODE_CHANGES_RU.md). Для UMP используется Protobuf Envelope. Адрес сервера задаётся в настройках VOT; `src/index.ts` менять не нужно.
 
-## Публичный доступ без API-ключей
-
-VOT (`/vot/*`) и Bilibili (`/api/resolve`, `/media/*`) доступны всем без `X-Proxy-Key` и `X-API-Key`. Установщик не создаёт пользовательские API-ключи. Временные медиа-токены и `TOKEN_SECRET` полностью удалены. Ограничение частоты запросов `/api/resolve` и суточная квота трафика сняты; остаются технические ограничения размера запроса, размера медиа и параллельных потоков.
-
-### Клиент VOT
-
-См. [пример `protobufEnvelopeProvider.ts`](docs/reference/protobufEnvelopeProvider.ts) и [настройку адреса сервера](docs/VOT_CODE_CHANGES_RU.md). Для Bilibili укажите собственный UMP-сервер в Helper и в проверке `isCustomLink()`.
-
 ## Подключение нового сайта одним файлом
 
 Добавьте `src/adapters/имя.js` с `export default` (поля `id`, `matches(url)`, `async resolve(url, context)` и, при необходимости, `mediaHosts: ['cdn.example.com']`) и перезапустите сервер. Новые адаптеры автоматически загружаются; для работы через `/api/resolve` адаптер также должен реализовать `stableMediaPath()` и `resolveMediaPath()`; список отображается в `/health`. Резервные `.bak` игнорируются. Подробный пример: [`src/adapters/README.md`](src/adapters/README.md). Особые маршруты Bilibili/Douyin остаются отдельной логикой.
