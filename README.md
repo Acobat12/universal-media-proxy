@@ -375,6 +375,6 @@ VOT (`/vot/*`) и Bilibili (`/api/resolve`, `/media/*`) доступны все�
 Постоянный адрес сам по себе не гарантирует сохранение перевода: VOT/Yandex могут формировать ключ кеша из дополнительных параметров. Для корректной идентификации сохраняйте оригинальный URL видео в VOT. Прокси не хранит готовые переводы Яндекса в своём SSD-кэше.
 
 
-### Подключение нового сайта к VOT
+## Интеграция с VOT
 
-Новый серверный адаптер **не регистрирует сайт в клиентском VOT**. Требуются клиентский Helper, его регистрация в актуальном реестре Helpers, получение UMP `mediaUrl` и проверка маршрута `VOTProtobufEnvelopeClient`. Для `.m4a` Bilibili критично переопределение `isCustomLink()`: иначе `requestVOT()` может отправить JSON вместо Protobuf. См. [инструкцию по адаптерам](src/adapters/README.md) и [пример Bilibili Helper](docs/reference/bilibili-helper-user-example.js).
+Инструкция для текущего форка VOT: [docs/VOT_CODE_CHANGES_RU.md](docs/VOT_CODE_CHANGES_RU.md). Для Bilibili обязательны регистрация Helper и обработка `.m4a` через Protobuf-клиент.
