@@ -4,6 +4,7 @@ import { finished } from 'node:stream/promises';
 import { assertPublicUrl, validRange } from './security.js';
 import { pinnedFetch } from './transport.js';
 import { fail } from './errors.js';
+import { proxyAudio } from './proxy.js';
 
 const pause = ms => new Promise(r => setTimeout(r, ms));
 export function parseRequestedRange(raw, total) {
@@ -48,7 +49,8 @@ export async function parallelAudio(req, res, source, {
   fetcher = pinnedFetch, validateUrl = assertPublicUrl, allowedHosts,
   threads = 8, chunkBytes = 512 * 1024, maxBytes = 1024 ** 3,
   cache = null, diskCache = null, cacheKey = '', cacheMaxFileBytes = 32 * 1024 ** 2,
-  retries = 3, onBytes = () => {}, idleTimeoutMs = 30000
+  retries = 3, onBytes = () => {}, idleTimeoutMs = 30000,
+  fallbackToStream = true, refreshSource
 } = {}) {
   threads = Math.max(1, Math.min(threads, 24));
   chunkBytes = Math.max(64 * 1024, Math.min(chunkBytes, 4 * 1024 ** 2));
@@ -95,7 +97,12 @@ export async function parallelAudio(req, res, source, {
       } catch { /* try another CDN */ }
       finally { clearTimeout(timer); ctrl.abort(); }
     }
-    if (!total) fail(502, 'CDN does not support byte ranges');
+    if (!total) {
+      if (!fallbackToStream) fail(502, 'CDN does not support byte ranges');
+      // Some CDNs cannot serve ranges. Preserve media availability with streaming.
+      res.off('close', abort);
+      return await proxyAudio(req, res, source, { fetcher, allowedHosts, maxBytes, refreshSource, onBytes });
+    }
     if (total > maxBytes) fail(413, 'Media exceeds configured limit');
     const [start, end, status] = parseRequestedRange(req.headers.range, total);
     const length = end - start + 1;

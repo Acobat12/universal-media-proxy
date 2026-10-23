@@ -12,7 +12,7 @@ test('registry matches Bilibili and rejects unknown sites', () => {
   assert.throws(() => r.find(new URL('https://example.org/video')));
 });
 test('Bilibili resolves best audio and fallback CDN', async () => {
-  const fetcher = async url => ({ ok: true, json: async () => url.includes('/view?') ? { code: 0, data: { pages: [{ cid: 42 }] } } : { code: 0, data: { dash: { audio: [{ bandwidth: 80, baseUrl: 'https://a.bilivideo.com/a.m4s', backupUrl: ['https://b.bilivideo.com/a.m4s'] }, { bandwidth: 40, baseUrl: 'https://c.bilivideo.com/a.m4s' }] } } } });
+  const fetcher = async url => ({ ok: true, json: async () => url.includes('/pagelist?') ? { code: 0, data: { pages: [{ cid: 42 }] } } : { code: 0, data: { dash: { audio: [{ bandwidth: 80, baseUrl: 'https://a.bilivideo.com/a.m4s', backupUrl: ['https://b.bilivideo.com/a.m4s'] }, { bandwidth: 40, baseUrl: 'https://c.bilivideo.com/a.m4s' }] } } } });
   const s = await bilibili.resolve(new URL('https://www.bilibili.com/video/BV1xx411c7mD?p=1'), { fetcher });
   assert.equal(s.metadata.cid, 42); assert.equal(s.upstreams.length, 2); assert.equal(s.upstreams[0], 'https://a.bilivideo.com/a.m4s');
 });

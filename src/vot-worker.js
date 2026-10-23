@@ -277,6 +277,50 @@ async function makeRequest(request) {
 
           firstFieldNumber: responseBytes.byteLength && mediaTypeOf(upstream.headers.get("content-type")) === PROTOBUF_MEDIA_TYPE ? (responseBytes[0] >>> 3) : null,
           firstWireType: responseBytes.byteLength && mediaTypeOf(upstream.headers.get("content-type")) === PROTOBUF_MEDIA_TYPE ? (responseBytes[0] & 7) : null,
+          protobufFields: (() => {
+            const fields = [];
+            let pos = 0;
+            const readVarint = () => {
+              let value = 0n;
+              for (let i = 0; i < 10; i++) {
+                if (pos >= responseBytes.length) throw Error("Truncated varint");
+                const b = responseBytes[pos++];
+                value |= BigInt(b & 127) << BigInt(7 * i);
+                if (!(b & 128)) return value;
+              }
+              throw Error("Invalid varint");
+            };
+            try {
+              while (pos < responseBytes.length && fields.length < 20) {
+                const tag = readVarint();
+                const field = Number(tag >> 3n);
+                const wire = Number(tag & 7n);
+                if (field === 0) throw Error("Invalid field");
+                if (wire === 0) {
+                  fields.push({ field, wire, value: readVarint().toString() });
+                } else if (wire === 1) {
+                  if (pos + 8 > responseBytes.length) throw Error("Truncated fixed64");
+                  pos += 8;
+                  fields.push({ field, wire, bytes: 8 });
+                } else if (wire === 2) {
+                  const length = Number(readVarint());
+                  if (!Number.isSafeInteger(length) || pos + length > responseBytes.length)
+                    throw Error("Invalid length");
+                  pos += length;
+                  fields.push({ field, wire, bytes: length });
+                } else if (wire === 5) {
+                  if (pos + 4 > responseBytes.length) throw Error("Truncated fixed32");
+                  pos += 4;
+                  fields.push({ field, wire, bytes: 4 });
+                } else {
+                  throw Error("Unsupported wire type");
+                }
+              }
+              return fields;
+            } catch (error) {
+              return [{ parseError: String(error.message) }];
+            }
+          })(),
           bodySHA256: await hexSHA256(responseBytes)
         });
 

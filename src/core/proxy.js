@@ -96,6 +96,13 @@ export async function proxyAudio(req, res, source, {
       res.end(); return;
     } catch (err) {
       lastError = err;
+     console.error('[PROXY ERROR]', {
+  site: source.site,
+  message: err?.message,
+  code: err?.code,
+  cause: err?.cause?.message,
+  headersSent: res.headersSent
+}); 
       if (res.headersSent) { res.destroy(err); return; }
       if (err.status && err.status < 500) throw err;
       if (attempt % (retries + 1) !== retries) await sleep(Math.min(500 * (attempt + 1), 1500));

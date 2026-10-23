@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { rewriteBilibiliUrls } from '../src/media-translation.js';
+import { rewriteBilibiliUrls } from '../src/adapters/bilibili.js';
 const field = b => Buffer.concat([Buffer.from([0x0a,b.length]), b]);
 test('rewrites nested protobuf Bilibili URL while preserving other fields', () => {
  const original = 'https://www.bilibili.com/video/BV18b411q7Fb/';
@@ -16,7 +16,7 @@ test('leaves unrelated protobuf payload unchanged', () => {
  const input = field(Buffer.from('hello'));
  assert.deepEqual(rewriteBilibiliUrls(input,'https://proxy.example/media').bytes,input);
 });
-import { rewriteEnvelopeMedia } from '../src/media-translation.js';
+import { rewriteEnvelopeMedia } from '../src/adapters/bilibili.js';
 const f = (tag, data) => Buffer.concat([Buffer.from([tag, data.length]), data]);
 test('VOT envelope rewrite preserves headers and path while rewriting inner URL', () => {
  const url = 'https://www.bilibili.com/video/BV18b411q7Fb/';
@@ -37,7 +37,8 @@ test('VOT envelope carries Bilibili source metadata independently of signed body
  assert.deepEqual(result.urls, []);
  assert.deepEqual(result.bytes, envelope);
 });
-import { stableMediaUrl, prepareMediaTranslation } from '../src/media-translation.js';
+import { stableMediaUrl } from '../src/adapters/bilibili.js';
+import { prepareMediaTranslation } from '../src/media-translation.js';
 test('stable URLs distinguish Bilibili parts and ignore tracking parameters', () => {
  const a = stableMediaUrl('https://www.bilibili.com/zh-Hans/video/BV18b411q7Fb/?p=2&vd_source=abc','https://media-proxy.mooo.com');
  const b = stableMediaUrl('https://www.bilibili.com/video/BV18b411q7Fb/?spm_id_from=x&p=2','https://media-proxy.mooo.com');

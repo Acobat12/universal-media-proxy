@@ -26,7 +26,7 @@ test('falls back to second CDN after first upstream error', async () => {
 });
 
 test('Bilibili quality selection chooses lowest track', async () => {
-  const fetcher = async u => ({ ok: true, json: async () => u.includes('/view?') ? { code: 0, data: { pages: [{ cid: 42 }] } } : { code: 0, data: { dash: { audio: [{ bandwidth: 80, baseUrl: 'https://a.bilivideo.com/hi' }, { bandwidth: 20, baseUrl: 'https://a.bilivideo.com/low' }] } } } });
+  const fetcher = async u => ({ ok: true, json: async () => u.includes('/pagelist?') ? { code: 0, data: { pages: [{ cid: 42 }] } } : { code: 0, data: { dash: { audio: [{ bandwidth: 80, baseUrl: 'https://a.bilivideo.com/hi' }, { bandwidth: 20, baseUrl: 'https://a.bilivideo.com/low' }] } } } });
   const s = await bilibili.resolve(new URL('https://www.bilibili.com/video/BV1xx411c7mD'), { fetcher, quality: 'lowest' });
   assert.equal(s.upstreams[0], 'https://a.bilivideo.com/low');
 });

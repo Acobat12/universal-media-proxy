@@ -9,11 +9,20 @@ export async function pinnedFetch(url, { method = 'GET', headers = {}, signal, c
   const addresses = await lookup(host, { all: true });
   if (!addresses.length || addresses.some(a => privateAddress(a.address))) throw Error('Unsafe DNS answer');
   const selected = addresses[0];
+  if (host === 'v3-dy-o.zjcdn.com') {
+    console.log('[DOUYIN CDN IP]', selected.address);
+  }
   return await new Promise((resolve, reject) => {
     let settled = false;
     const request = https.request(url, {
       method, headers, agent: false, signal, timeout: connectTimeoutMs,
-      lookup: (_hostname, _options, cb) => cb(null, selected.address, selected.family),
+      lookup: (_hostname, options, cb) => {
+        if (options?.all) {
+          cb(null, [{ address: selected.address, family: selected.family }]);
+        } else {
+          cb(null, selected.address, selected.family);
+        }
+      },
       maxHeaderSize: 16384
     }, response => {
       settled = true;
