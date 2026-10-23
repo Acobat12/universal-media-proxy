@@ -53,7 +53,7 @@ export function createHandler({ secret, publicBaseUrl, allowedHosts = DEFAULT_HO
         for (const candidate of source.upstreams) await assertPublicUrl(candidate, effectiveAllowedHosts);
         return parallelAudio(req, res, source, { fetcher: mediaFetcher, allowedHosts: effectiveAllowedHosts, maxBytes,
           threads: parallelThreads, chunkBytes: parallelChunkBytes, fallbackToStream: true,
-          cache: audioCache, diskCache, cacheKey: url.pathname, cacheMaxFileBytes, onBytes: () => {} });
+          cache: audioCache, diskCache: adapter.id === 'bilibili' ? null : diskCache, cacheKey: url.pathname, cacheMaxFileBytes, onBytes: () => {} });
       }
       if (req.method === 'OPTIONS') { res.writeHead(204, { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET,HEAD,OPTIONS', 'Access-Control-Allow-Headers': 'Range' }); return res.end(); }
       return send(404, { error: 'Not found' });

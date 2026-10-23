@@ -1,4 +1,5 @@
 import { fail } from '../core/errors.js';
+import { signedProxyMediaUrlFromEnvelope } from '../core/vot-protobuf.js';
 const SITE = ['www.bilibili.com', 'bilibili.com'];
 const API = 'https://api.bilibili.com';
 const HEADERS = {
@@ -16,8 +17,41 @@ async function json(url, fetcher, signal) {
   if (body.code !== 0) fail(502, `Bilibili API error ${body.code}: ${String(body.message).slice(0, 120)}`);
   return body.data;
 }
+// Registration mirrors Douyin's helper-to-UMP handshake. It does not change
+// the binary Protobuf requirement of /video-translation/translate.
+const bilibiliRegistrations = new Map();
+const BILIBILI_REGISTRATION_TTL = 24 * 60 * 60 * 1000;
+
 export const bilibili = {
   id: 'bilibili',
+  async handleRequest({ req, url, base, send }) {
+    if (url.pathname !== '/api/bilibili/register' || req.method !== 'POST') return false;
+    let size = 0;
+    const chunks = [];
+    for await (const chunk of req) {
+      size += chunk.length;
+      if (size > 2048) fail(413, 'Request too large');
+      chunks.push(chunk);
+    }
+    let data;
+    try { data = JSON.parse(Buffer.concat(chunks).toString('utf8')); }
+    catch { fail(400, 'Invalid JSON'); }
+    const bvid = String(data?.bvid || '');
+    const page = Number(data?.page ?? 1);
+    if (!/^BV[A-Za-z0-9]{8,20}$/.test(bvid) || !Number.isSafeInteger(page) || page < 1 || page > 1000) {
+      fail(400, 'Invalid Bilibili video identifiers');
+    }
+    const key = `${bvid}:p${page}`;
+    if (bilibiliRegistrations.size > 2000) {
+      for (const [id, entry] of bilibiliRegistrations) {
+        if (entry.until <= Date.now()) bilibiliRegistrations.delete(id);
+      }
+      if (bilibiliRegistrations.size > 2000) bilibiliRegistrations.delete(bilibiliRegistrations.keys().next().value);
+    }
+    bilibiliRegistrations.set(key, { until: Date.now() + BILIBILI_REGISTRATION_TTL });
+    send(200, { mediaUrl: new URL(`/media/bilibili/${bvid}/p${page}/audio.m4a`, base).href });
+    return true;
+  },
   mediaHosts: ['bilivideo.com', 'bilibili.com', 'hdslb.com'],
   stableMediaPath(url) {
     const { bvid, page } = canonicalBilibiliVideo(url.href);
@@ -28,12 +62,23 @@ export const bilibili = {
     if (!match || Number(match[2]) > 1000) fail(404, 'Invalid Bilibili media path');
     return this.resolve(new URL(`https://www.bilibili.com/video/${match[1]}/?p=${match[2]}`), context);
   },
-  async prepareMediaTranslation(body, context) {
-    // Decline requests for other sites without blocking later adapters.
-    // Keep strict validation for requests that actually mention Bilibili.
+  mediaTranslationPriority: 10,
+  async prepareMediaTranslation(body, { publicBaseUrl }) {
+    // As with Douyin: the media URL must already be inside the signed
+    // Yandex protobuf. Never rewrite signed bytes using envelope metadata.
     if (!Buffer.isBuffer(body) && !(body instanceof Uint8Array)) return null;
-    if (!Buffer.from(body).includes(Buffer.from('bilibili.com'))) return null;
-    return prepareBilibiliMediaTranslation(body, context);
+    let signed;
+    try { signed = signedProxyMediaUrlFromEnvelope(body); }
+    catch { return null; }
+    if (!signed) return null;
+    let candidate, base;
+    try { candidate = new URL(signed); base = new URL(publicBaseUrl); }
+    catch { return null; }
+    if (candidate.origin !== base.origin ||
+        !/^\/media\/bilibili\/BV[A-Za-z0-9]{8,20}\/p(?:[1-9]\d{0,2}|1000)\/audio\.m4a$/.test(candidate.pathname) ||
+        candidate.search || candidate.hash || candidate.username || candidate.password) return null;
+    console.log('[MEDIA MODE] Bilibili signed proxy media URL accepted; forwarding unchanged');
+    return { body, mediaUrl: candidate.href };
   },
   matches(u) { return SITE.includes(u.hostname.toLowerCase()) && !!videoId(u); },
   async resolve(u, { fetcher = fetch, signal, quality = 'best' } = {}) {
@@ -47,103 +92,32 @@ export const bilibili = {
     const cid = pages?.[p - 1]?.cid;
     if (!Number.isSafeInteger(cid) || cid <= 0) fail(404, 'Video part not found');
     // WBI endpoint: may require signing or account access for some videos.
-    const play = await json(`${API}/x/player/wbi/playurl?bvid=${encodeURIComponent(bvid)}&cid=${cid}&fnval=16`, fetcher, signal);
+    const play = await json(`${API}/x/player/playurl?bvid=${encodeURIComponent(bvid)}&cid=${cid}&fnval=16`, fetcher, signal);
     const tracks = (play.dash?.audio || []).filter(a => a.baseUrl || a.base_url).sort((a,b) => (b.bandwidth || 0) - (a.bandwidth || 0));
     if (!tracks.length) fail(422, 'No DASH audio track (region/login/WBI may be required)');
     const index = quality === 'lowest' ? tracks.length - 1 : quality === 'medium' ? Math.floor((tracks.length - 1) / 2) : 0;
     const audio = tracks[index];
     const urls = [audio.baseUrl || audio.base_url, ...(audio.backupUrl || audio.backup_url || [])];
-    return { site: 'bilibili', id: `${bvid}-p${p}`, contentType: audio.mimeType || 'audio/mp4', upstreams: [...new Set(urls)], headers: HEADERS, metadata: { bvid, cid, page: p, quality, bandwidth: audio.bandwidth || null } };
+    const upstreams = [...new Set(urls)].filter(value => {
+      try {
+        const u = new URL(value);
+        const host = u.hostname.toLowerCase();
+        return u.protocol === 'https:' && !u.username && !u.password &&
+          (!u.port || u.port === '443') &&
+          this.mediaHosts.some(domain => host === domain || host.endsWith('.' + domain));
+      } catch { return false; }
+    });
+    if (!upstreams.length) fail(502, 'No allowed Bilibili audio CDN');
+    return { site: 'bilibili', id: `${bvid}-p${p}`, contentType: audio.mimeType || 'audio/mp4', upstreams, headers: HEADERS, metadata: { bvid, cid, page: p, quality, bandwidth: audio.bandwidth || null } };
   }
 };
 
-// Bilibili-specific VOT translation integration.
-// Media-mode translation request preparation. The VOT API gateway is deliberately separate.
-
-const utf8 = new TextDecoder('utf-8', { fatal: true });
-const enc = new TextEncoder();
-function readVarint(buf, pos) {
-  let val = 0, shift = 0, p = pos;
-  for (let i = 0; i < 5; i++) {
-    if (p >= buf.length) throw Error('Truncated protobuf');
-    const b = buf[p++]; val += (b & 127) * 2 ** shift;
-    if (!(b & 128)) return [val, p];
-    shift += 7;
-  }
-  throw Error('Unsupported protobuf varint');
-}
-function varint(n) {
-  const out = [];
-  do { const b = n % 128; n = Math.floor(n / 128); out.push(b | (n ? 128 : 0)); } while (n);
-  return Buffer.from(out);
-}
-const isBilibili = value => {
-  try { const u = new URL(value); return u.protocol === 'https:' && /^(?:www\.)?bilibili\.com$/.test(u.hostname) && /^\/(?:[a-z]{2}(?:-[A-Za-z]{2,8})?\/)?video\/BV[A-Za-z0-9]+(?:\/|$)/i.test(u.pathname); }
-  catch { return false; }
-};
-// Walk protobuf wire fields, including nested messages. Preserve unknown fields byte-for-byte.
-export function rewriteBilibiliUrls(buffer, replacement, depth = 0) {
-  if (depth > 6 || buffer.length > 1048576) return { bytes: buffer, urls: [] };
-  let pos = 0; const out = []; const urls = [];
-  try {
-    while (pos < buffer.length) {
-      const start = pos;
-      const [tag, afterTag] = readVarint(buffer, pos); pos = afterTag;
-      const wire = tag & 7;
-      if (!tag || (tag >>> 3) === 0) throw Error('Invalid field');
-      if (wire === 0) { [, pos] = readVarint(buffer, pos); out.push(buffer.subarray(start, pos)); }
-      else if (wire === 1 || wire === 5) { pos += wire === 1 ? 8 : 4; if (pos > buffer.length) throw Error('Truncated fixed'); out.push(buffer.subarray(start, pos)); }
-      else if (wire === 2) {
-        const [length, dataStart] = readVarint(buffer, pos); const end = dataStart + length;
-        if (end > buffer.length) throw Error('Truncated bytes');
-        const value = buffer.subarray(dataStart, end); pos = end;
-        let replaced = null;
-        try { const str = utf8.decode(value); if (isBilibili(str)) { urls.push(str); replaced = enc.encode(replacement); } } catch {}
-        if (!replaced && depth < 6) {
-          const nested = rewriteBilibiliUrls(value, replacement, depth + 1);
-          if (nested.urls.length) { urls.push(...nested.urls); replaced = nested.bytes; }
-        }
-        if (replaced) out.push(buffer.subarray(start, afterTag), varint(replaced.length), replaced);
-        else out.push(buffer.subarray(start, end));
-      } else throw Error('Unsupported wire type');
-    }
-    return { bytes: Buffer.concat(out), urls };
-  } catch { return { bytes: buffer, urls: [] }; }
-}
-// The browser VOT client sends a protobuf envelope (headers=1, body=2, path=3).
-// Rewrite only field 2; never confuse header strings with the translation payload.
-export function rewriteEnvelopeMedia(body, replacement, expectedPath = '/video-translation/translate') {
-  let pos = 0, path = null, bodyCount = 0, sourceVideoUrl = null;
-  const chunks = [], urls = [];
-  while (pos < body.length) {
-    const start = pos;
-    const [tag, afterTag] = readVarint(body, pos);
-    if ((tag & 7) !== 2 || ![1, 2, 3, 4].includes(tag >>> 3)) throw Error('Invalid VOT envelope');
-    const [length, dataStart] = readVarint(body, afterTag);
-    const end = dataStart + length;
-    if (end > body.length) throw Error('Truncated VOT envelope');
-    const field = tag >>> 3;
-    if (field === 3) path = utf8.decode(body.subarray(dataStart, end));
-    if (field === 4) {
-      if (sourceVideoUrl !== null) throw Error("Duplicate source video URL");
-      sourceVideoUrl = utf8.decode(body.subarray(dataStart, end));
-      if (!isBilibili(sourceVideoUrl)) throw Error("Invalid Bilibili source URL");
-    }
-    if (field === 2) {
-      bodyCount++;
-      const rewritten = rewriteBilibiliUrls(body.subarray(dataStart, end), replacement);
-      urls.push(...rewritten.urls);
-      chunks.push(body.subarray(start, afterTag), varint(rewritten.bytes.length), rewritten.bytes);
-    } else chunks.push(body.subarray(start, end));
-    pos = end;
-  }
-  if (path !== expectedPath || bodyCount !== 1) throw Error('Unexpected VOT envelope path or body');
-  return { bytes: Buffer.concat(chunks), urls, sourceVideoUrl };
-}
+// Bilibili-specific URL validation. Translation uses the signed URL directly.
 export function canonicalBilibiliVideo(value) {
-  if (!isBilibili(value)) throw Error('Invalid Bilibili video URL');
   const u = new URL(value);
-  const match = u.pathname.match(/\/video\/(BV[A-Za-z0-9]+)(?:\/|$)/i);
+  if (u.protocol !== 'https:' || !/^(?:www\.)?bilibili\.com$/i.test(u.hostname)) throw Error('Invalid Bilibili video URL');
+  const match = u.pathname.match(/^\/(?:[a-z]{2}(?:-[A-Za-z]{2,8})?\/)?video\/(BV[A-Za-z0-9]{8,20})(?:\/|$)/i);
+  if (!match) throw Error('Invalid Bilibili video URL');
   const raw = u.searchParams.get('p') || '1';
   const page = Number(raw);
   if (!/^[1-9]\d*$/.test(raw) || !Number.isSafeInteger(page) || page > 1000) throw Error('Invalid Bilibili part');
@@ -153,25 +127,3 @@ export function stableMediaUrl(videoUrl, publicBaseUrl) {
   const { bvid, page } = canonicalBilibiliVideo(videoUrl);
   return new URL(`/media/bilibili/${bvid}/p${page}/audio.m4a`, publicBaseUrl).href;
 }
-import { signedProxyMediaUrlFromEnvelope } from '../core/vot-protobuf.js';
-export async function prepareBilibiliMediaTranslation(body, { publicBaseUrl }) {
-  // No network call here. Media is fetched only if the stable URL is requested.
-  const found = rewriteEnvelopeMedia(body, 'https://placeholder.invalid/media');
-  const unique = [...new Set(found.urls)];
-  const videoUrl = found.sourceVideoUrl || (unique.length === 1 ? unique[0] : null);
-  if (!videoUrl) throw Error(`Missing Bilibili source URL (protobuf matches: ${unique.length}); update VOT client`);
-  if (unique.length && (unique.length !== 1 || unique[0] !== videoUrl)) throw Error('Conflicting Bilibili URLs in request');
-  const mediaUrl = stableMediaUrl(videoUrl, publicBaseUrl);
-  // The UserScript generated this URL before signing. Preserve the exact bytes.
-  if (found.sourceVideoUrl && unique.length === 0) {
-    const signedUrl = signedProxyMediaUrlFromEnvelope(body);
-    if (signedUrl === mediaUrl) {
-      console.log('[MEDIA MODE] signed proxy media URL accepted; forwarding unchanged');
-      return { body, mediaUrl };
-    }
-  }
-
-  if (!unique.length) throw Error('Bilibili URL supplied as metadata, but the signed Yandex protobuf contains no replaceable URL; cannot substitute media URL without changing the signing flow');
-  return { body: rewriteEnvelopeMedia(body, mediaUrl).bytes, mediaUrl };
-}
-

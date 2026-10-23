@@ -17,3 +17,11 @@
 - [ ] Настроены HTTPS, лимиты нагрузки и защита публичного прокси.
 
 Подробная последовательность: [VOT_QUICKSTART_RU.md](VOT_QUICKSTART_RU.md). Изменения для ранее проверенного форка: [VOT_CODE_CHANGES_RU.md](VOT_CODE_CHANGES_RU.md).
+
+## Новый сайт: дополнительные обязательные проверки
+
+- [ ] Серверный адаптер создан по актуальному образцу `src/adapters/bilibili.js` / `douyin.js`.
+- [ ] В VOT добавлен Helper по актуальному API `BaseHelper` и **зарегистрирован** в реестре Helpers/сайтов.
+- [ ] Helper получает `mediaUrl` через серверную регистрацию (если требуется), проверяет origin/path и передаёт его в `getVideoData()`.
+- [ ] Для `.m4a` и других custom-link URL проверена ветка `isCustomLink()`; если она ведёт в JSON `requestVOT()`, добавлено узкое исключение в `protobufEnvelopeProvider.ts`.
+- [ ] Проверены `[FORK][protobuf-envelope]`, фактический Content-Type, Range, перевод и работа существующих сайтов.

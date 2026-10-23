@@ -102,3 +102,8 @@ Content-Type: application/x-vot-envelope+protobuf
 ## Что нельзя обещать заранее
 
 Пример TypeScript-клиента и патч относятся к конкретному форку VOT; интеграция с другой версией может потребовать дополнительных изменений. Автоматические тесты сервера не заменяют тесты реального перевода, сессий и аудио в браузере.
+
+
+## При подключении нового сайта
+
+Серверного адаптера недостаточно: зарегистрируйте клиентский Helper в VOT и проверьте, что `.m4a` не направляет перевод через JSON `requestVOT()`. Полная последовательность и пример Bilibili: [src/adapters/README.md](../src/adapters/README.md), [Bilibili Helper](reference/bilibili-helper-user-example.js), [Protobuf provider](reference/protobufEnvelopeProvider.ts).

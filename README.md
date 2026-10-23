@@ -373,3 +373,8 @@ VOT (`/vot/*`) и Bilibili (`/api/resolve`, `/media/*`) доступны все�
 Сервер **не создаёт временные медиа-токены**: модуль `src/core/token.js` и маршрут `/media/<token>` удалены. `POST /api/resolve` возвращает постоянный URL только для адаптеров, поддерживающих `stableMediaPath()` и `resolveMediaPath()`. Bilibili поддерживается; Douyin использует отдельную регистрацию `/api/douyin/register` и `/media/douyin/<awemeId>/audio.mp4`. Регистрация Douyin хранится в памяти и не переживает перезапуск процесса.
 
 Постоянный адрес сам по себе не гарантирует сохранение перевода: VOT/Yandex могут формировать ключ кеша из дополнительных параметров. Для корректной идентификации сохраняйте оригинальный URL видео в VOT. Прокси не хранит готовые переводы Яндекса в своём SSD-кэше.
+
+
+### Подключение нового сайта к VOT
+
+Новый серверный адаптер **не регистрирует сайт в клиентском VOT**. Требуются клиентский Helper, его регистрация в актуальном реестре Helpers, получение UMP `mediaUrl` и проверка маршрута `VOTProtobufEnvelopeClient`. Для `.m4a` Bilibili критично переопределение `isCustomLink()`: иначе `requestVOT()` может отправить JSON вместо Protobuf. См. [инструкцию по адаптерам](src/adapters/README.md) и [пример Bilibili Helper](docs/reference/bilibili-helper-user-example.js).

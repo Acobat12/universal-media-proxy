@@ -42,6 +42,22 @@ export function encodeVotEnvelope(headers: Record<string, string>, body: Uint8Ar
 
 // Use the local VOTClient: it preserves session signatures, errors and abort handling.
 export default class VOTProtobufEnvelopeClient extends VOTClient {
+  // VOT may classify .m4a as a custom link and call requestVOT(JSON).
+  // Only the trusted Bilibili UMP media URL must take the binary request path.
+  override isCustomLink(url: string): boolean {
+    const isBilibiliPage =
+      typeof location !== "undefined" &&
+      /(?:^|\.)bilibili\.com$/i.test(location.hostname);
+    const isBilibiliMedia =
+      /^https:\/\/media-proxy\.freedynamicdns\.org\/media\/bilibili\//i.test(url);
+
+    if (isBilibiliPage && isBilibiliMedia) {
+      console.info("[FORK][bilibili] forcing protobuf translation path", { url });
+      return false;
+    }
+    return super.isCustomLink(url);
+  }
+
   override async request<T = ArrayBuffer>(
     path: string,
     body: Uint8Array,
