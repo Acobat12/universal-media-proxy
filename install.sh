@@ -29,6 +29,9 @@ if [[ "$VOT_CONFIRM" =~ ^[YyДд]$ ]]; then VOT_ENABLED=true; fi
 read -rp 'Установить yt-dlp с официального GitHub и включить резервное извлечение для Bilibili? [Y/n]: ' YTDLP_CONFIRM
 INSTALL_YTDLP=true
 if [[ "$YTDLP_CONFIRM" =~ ^[NnНн]$ ]]; then INSTALL_YTDLP=false; fi
+read -rp 'Установить Chromium для получения серверных cookies TikTok? [y/N]: ' TIKTOK_CONFIRM
+INSTALL_TIKTOK_BROWSER=false
+if [[ "$TIKTOK_CONFIRM" =~ ^[YyДд]$ ]]; then INSTALL_TIKTOK_BROWSER=true; fi
 read -rp 'Лимит SSD-кэша в МиБ [1024]: ' CACHE_MB
 CACHE_MB="${CACHE_MB:-1024}"
 if [[ ! "$CACHE_MB" =~ ^[0-9]+$ ]] || (( CACHE_MB < 64 || CACHE_MB > 10240 )); then echo 'Лимит SSD: 64–10240 МиБ'; exit 1; fi
@@ -60,8 +63,22 @@ fi
 if ! id -u ump >/dev/null 2>&1; then useradd --system --home /opt/universal-media-proxy --shell /usr/sbin/nologin ump; fi
 install -d -m 0755 /opt/universal-media-proxy /var/cache/universal-media-proxy
 chown ump:ump /var/cache/universal-media-proxy
-cp -a src package.json /opt/universal-media-proxy/
+cp -a src package.json package-lock.json /opt/universal-media-proxy/
 chown -R root:root /opt/universal-media-proxy
+(
+  cd /opt/universal-media-proxy
+  # Playwright уже зафиксирован в package-lock.json.
+  # Установка npm-пакетов не должна автоматически загружать браузер.
+  PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci --omit=dev
+  if [[ "$INSTALL_TIKTOK_BROWSER" == true ]]; then
+    echo 'Устанавливаются системные зависимости и Chromium для TikTok...'
+    ./node_modules/.bin/playwright install-deps chromium
+    install -d -m 0755 /opt/universal-media-proxy/.cache/ms-playwright
+    PLAYWRIGHT_BROWSERS_PATH=/opt/universal-media-proxy/.cache/ms-playwright ./node_modules/.bin/playwright install chromium
+    chmod -R a+rX /opt/universal-media-proxy/.cache/ms-playwright
+  fi
+)
+
 SECRET="$(openssl rand -hex 32)"
 if [[ "$MODE" == ip ]]; then BIND=0.0.0.0; else BIND=127.0.0.1; fi
 cat > /etc/universal-media-proxy.env <<ENV
@@ -76,11 +93,16 @@ YTDLP_ALLOWED_HOSTS=bilibili.com
 DEFAULT_AUDIO_MODE=disk
 PARALLEL_THREADS=8
 PARALLEL_CHUNK_BYTES=524288
+TIKTOK_REGISTRATIONS_FILE=/var/cache/universal-media-proxy/tiktok-registrations.json
+TIKTOK_PROFILE_DIR=/var/cache/universal-media-proxy/tiktok-profile
+TIKTOK_MAX_PAGES=2
 DISK_CACHE_DIR=/var/cache/universal-media-proxy
 DISK_CACHE_TTL_MS=900000
 DISK_CACHE_MAX_BYTES=$((CACHE_MB * 1048576))
 DISK_CACHE_MAX_FILE_BYTES=268435456
 ENABLE_VOT_PROXY=$VOT_ENABLED
+ENABLE_TIKTOK_BROWSER=$INSTALL_TIKTOK_BROWSER
+PLAYWRIGHT_BROWSERS_PATH=/opt/universal-media-proxy/.cache/ms-playwright
 VOT_MAX_BODY_BYTES=1048576
 ENV
 chmod 0600 /etc/universal-media-proxy.env
@@ -125,6 +147,7 @@ systemctl is-active --quiet universal-media-proxy || { journalctl -u universal-m
 echo
 echo "Установка завершена. Адрес: $PUBLIC_URL"
 echo "yt-dlp: $INSTALL_YTDLP (разрешённые источники: bilibili.com)"
+echo "Chromium для TikTok: $INSTALL_TIKTOK_BROWSER"
 if [[ "$VOT_ENABLED" == true ]]; then echo "VOT API открыт без ключа: $PUBLIC_URL/vot"; fi
 echo "Проверка: curl $PUBLIC_URL/health"
 echo 'Логи: sudo journalctl -u universal-media-proxy -f'

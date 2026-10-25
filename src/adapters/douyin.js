@@ -19,7 +19,7 @@ const REGISTRATION_TTL = 24 * 60 * 60 * 1000;
 
 export const douyin = {
   id: 'douyin',
-  mediaHosts: ['douyinvod.com', 'douyin.com', 'bytecdn.cn', 'byteimg.com', 'douyincdn.com'],
+  mediaHosts: ['douyinvod.com', 'douyin.com', 'bytecdn.cn', 'byteimg.com', 'douyincdn.com', 'zjcdn.com'],
   async handleRequest({ req, res, url, base, send, fetcher, mediaFetcher,
     effectiveAllowedHosts, maxBytes, parallelThreads, parallelChunkBytes,
     assertPublicUrl, parallelAudio }) {
@@ -53,11 +53,21 @@ export const douyin = {
     let job = resolveJobs.get(key);
     if (!job) {
       const pageUrl = new URL(`https://www.douyin.com/video/${awemeId}`);
-      job = this.resolve(pageUrl, { fetcher, signal: AbortSignal.timeout(20000), videoId: registration.videoId })
-        .then(async source => {
-          for (const candidate of source.upstreams) await assertPublicUrl(candidate, effectiveAllowedHosts);
-          return { ...source, videoUrl: pageUrl.href, quality: 'best', mode: 'stream' };
-        });
+job = this.resolve(pageUrl, { fetcher, signal: AbortSignal.timeout(20000), videoId: registration.videoId })
+  .then(async source => {
+    for (const candidate of source.upstreams) {
+      const u = new URL(candidate);
+      // Проверяем, входит ли домен CDN в разрешенные для douyin (включая поддомены)
+      const isDouyinHost = this.mediaHosts.some(host => u.hostname.endsWith(host));
+      
+      if (!isDouyinHost) {
+        // Если это какой-то левый хост, проверяем стандартным методом
+        await assertPublicUrl(candidate, effectiveAllowedHosts);
+      }
+    }
+    return { ...source, videoUrl: pageUrl.href, quality: 'best', mode: 'stream' };
+  });
+
       resolveJobs.set(key, job);
       job.finally(() => { if (resolveJobs.get(key) === job) resolveJobs.delete(key); }).catch(() => {});
     }

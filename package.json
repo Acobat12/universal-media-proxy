@@ -1,1 +1,1 @@
-{"name":"universal-media-proxy","version":"1.4.0","private":true,"type":"module","engines":{"node":">=22"},"scripts":{"start":"node src/server.js","dev":"node --watch src/server.js","test":"node --test","check":"node --check src/server.js"},"license":"MIT"}
+{"name":"universal-media-proxy","version":"1.4.0","private":true,"type":"module","engines":{"node":">=22"},"scripts":{"start":"node src/server.js","dev":"node --watch src/server.js","test":"node --test","check":"node --check src/server.js"},"license":"MIT","dependencies":{"playwright":"^1.64.1"}}
