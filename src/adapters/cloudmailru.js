@@ -4,7 +4,7 @@ import { createReadStream } from 'node:fs';
 import { mkdir, rename, stat, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fail } from '../core/errors.js';
-import { adapterMediaCache } from '../core/adapter-media-cache.js';
+import { createAdapterMediaStorage } from '../core/universal-media-storage.js';
 import { signedProxyMediaUrlFromEnvelope } from '../core/vot-protobuf.js';
 
 const MEDIA = /^\/media\/cloudmailru\/([A-Za-z0-9_-]{4,256})\/audio\.m4a$/;
@@ -12,7 +12,7 @@ const registrations = new Map();
 const jobs = new Map();
 const TTL = 24 * 60 * 60 * 1000;
 const LIMIT = 1000;
-const cache = adapterMediaCache('cloudmailru', id => jobs.has(id));
+const cache = createAdapterMediaStorage('cloudmailru', id => jobs.has(id));
 const CACHE_DIR = cache.directory;
 cache.sweep().catch(e => console.error('[CloudMailRu] Initial cache sweep failed:', e));
 const MAX_CONCURRENT = 2;
@@ -161,10 +161,13 @@ async function buildFile(id) {
   if (await readyFile(id)) return;
   if (jobs.has(id)) return jobs.get(id);
   if (jobs.size >= MAX_CONCURRENT) fail(503, 'Cloud Mail.ru conversion capacity reached; retry later');
-  const job = (async () => {
+    const job = (async () => {
+    const reservation = await cache.reserve(Math.min(Number(process.env.DISK_CACHE_MAX_BYTES || 1024 ** 3), 256 * 1024 ** 2));
+    try {
     await mkdir(CACHE_DIR, { recursive: true });
     if (await readyFile(id)) return;
     const partial = join(CACHE_DIR, `${id}.${process.pid}.${Date.now()}.partial.m4a`);
+    reservation.watch(partial);
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(new Error('Cloud Mail.ru build timeout')), MAX_BUILD_MS);
     let ffmpeg;
@@ -229,6 +232,7 @@ async function buildFile(id) {
       await finished;
       const result = await stat(partial);
       if (!result.size) throw new Error('Empty M4A');
+      await reservation.verify();
       await rename(partial, filePath(id));
     } catch (error) {
       controller.abort(error);
@@ -242,6 +246,7 @@ async function buildFile(id) {
     } finally {
       clearTimeout(timer);
     }
+    } finally { reservation.release(); }
   })();
   jobs.set(id, job);
   try { await job; } finally { jobs.delete(id); }

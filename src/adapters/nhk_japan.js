@@ -4,7 +4,7 @@ import { createReadStream } from 'node:fs';
 import { mkdir, rename, stat, unlink, readFile, writeFile, appendFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { adapterMediaCache } from '../core/adapter-media-cache.js';
+import { createAdapterMediaStorage } from '../core/universal-media-storage.js';
 import { fail } from '../core/errors.js';
 import { signedProxyMediaUrlFromEnvelope } from '../core/vot-protobuf.js';
 
@@ -13,7 +13,7 @@ const registrations = new Map();
 const jobs = new Map();
 const TTL = 60 * 60 * 1000;
 const LIMIT = 1000;
-const cache = adapterMediaCache('nhk-japan', id => jobs.has(id));
+const cache = createAdapterMediaStorage('nhk-japan', id => jobs.has(id));
 const CACHE_DIR = cache.directory;
 cache.sweep().catch(e => console.error('[NHK_JAPAN] Initial cache sweep failed:', e));
 const MAX_CONCURRENT = 2;
@@ -203,12 +203,16 @@ async function buildFile(id) {
   if (await readyFile(id)) return;
   if (jobs.has(id)) return jobs.get(id);
   if (jobs.size >= MAX_CONCURRENT) fail(503, 'NHK conversion capacity reached; retry later');
-  const job = (async () => {
+    const job = (async () => {
+    const reservation = await cache.reserve(Math.min(Number(process.env.DISK_CACHE_MAX_BYTES || 1024 ** 3), 256 * 1024 ** 2));
+    try {
     await mkdir(CACHE_DIR, { recursive: true });
     if (await readyFile(id)) return;
     const partial = join(CACHE_DIR, `${id}.${process.pid}.${Date.now()}.partial.m4a`);
+    reservation.watch(partial);
     try {
       const workDir = join(CACHE_DIR, `${id}.${process.pid}.${Date.now()}.segments`);
+      reservation.watch(workDir);
       let input = manifestFromId(id);
       try {
         await mkdir(workDir, { recursive: true });
@@ -238,11 +242,13 @@ async function buildFile(id) {
       }
       const s = await stat(partial);
       if (!s.size) throw new Error('Empty M4A');
+      await reservation.verify();
       await rename(partial, filePath(id));
     } catch (e) {
       await unlink(partial).catch(() => {});
       throw e;
     }
+    } finally { reservation.release(); }
   })();
   jobs.set(id, job);
   try { await job; } finally { jobs.delete(id); }

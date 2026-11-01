@@ -33,3 +33,34 @@ test('SSD cache rejects oversized files and cleans failed downloads', async () =
     assert.deepEqual(await readdir(dir), []);
   } finally { cache.close(); await rm(dir, { recursive: true, force: true }); }
 });
+
+test('concurrent writers reserve capacity before writing', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ump-reservation-test-'));
+  const cache = createDiskCache({ directory: dir, maxBytes: 10, maxFileBytes: 10 });
+  let started;
+  const writerStarted = new Promise(resolve => { started = resolve; });
+  let unblock;
+  const gate = new Promise(resolve => { unblock = resolve; });
+  try {
+    const first = cache.acquire('first', 7, async path => { started(); await gate; await writeFile(path, '1234567'); });
+    // Allow the first acquire to reach its writer.
+    await writerStarted;
+    assert.equal(cache.stats().reservedBytes, 7);
+    await assert.rejects(cache.acquire('second', 7, async path => writeFile(path, '1234567')), /capacity exhausted/);
+    unblock();
+    const lease = await first;
+    await lease.release();
+    assert.equal(cache.stats().reservedBytes, 0);
+  } finally { unblock(); cache.close(); await rm(dir, { recursive: true, force: true }); }
+});
+
+test('core reservation respects existing M4A files in the shared cache root', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ump-shared-test-'));
+  const { mkdir } = await import('node:fs/promises');
+  await mkdir(join(root, 'nhk'));
+  await writeFile(join(root, 'nhk', 'sample123.m4a'), Buffer.alloc(8));
+  const cache = createDiskCache({ directory: join(root, 'core'), maxBytes: 10, maxFileBytes: 10 });
+  try {
+    await assert.rejects(cache.acquire('other', 5, async path => writeFile(path, Buffer.alloc(5))), /capacity exhausted/);
+  } finally { cache.close(); await rm(root, { recursive: true, force: true }); }
+});

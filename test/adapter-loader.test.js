@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { loadAdapters, registry } from '../src/core/adapter-loader.js';
 
 test('built-in adapters are discovered automatically', () => {
-  assert.deepEqual(registry.adapters.map(a => a.id).sort(), ['bilibili', 'douyin']);
+  assert.deepEqual(registry.adapters.map(a => a.id).sort(), ['bilibili', 'cloudmailru', 'coub', 'douyin', 'nhk', 'nhk-japan', 'tiktok']);
 });
 test('adding one adapter file makes it discoverable; backups are ignored', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'adapter-test-'));

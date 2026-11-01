@@ -1,4 +1,3 @@
-import { chromium } from 'playwright';
 import { mkdir } from 'node:fs/promises';
 import { resolve } from 'node:path';
 
@@ -17,6 +16,7 @@ function log(reason, details = {}) {
 }
 async function launch() {
   await mkdir(profileDir, { recursive: true, mode: 0o700 });
+  const { chromium } = await import('playwright');
   const ctx = await chromium.launchPersistentContext(profileDir, {
     headless: true, args: ['--no-sandbox'],
   });

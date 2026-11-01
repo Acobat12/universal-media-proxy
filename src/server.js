@@ -3,8 +3,8 @@ import { prepareMediaTranslation } from './media-translation.js';
 import http from 'node:http';
 import { registry } from './core/adapter-loader.js';
 import { parallelAudio, createAudioCache } from './core/parallel.js';
-import { createDiskCache } from './core/disk-cache.js';
-import { mediaCacheConfig } from './core/adapter-media-cache.js';
+import { createDiskCache } from './core/universal-media-storage.js';
+import { mediaStorageConfig } from './core/universal-media-storage.js';
 import { join, resolve } from 'node:path';
 import { pinnedFetch } from './core/transport.js';
 import { HttpError, fail } from './core/errors.js';
@@ -19,7 +19,7 @@ export function createHandler({ secret, publicBaseUrl, allowedHosts = DEFAULT_HO
   // Adapter-declared CDN domains extend the trusted allowlist; DNS/IP checks still apply.
   const effectiveAllowedHosts = [...new Set([...allowedHosts, ...registry.adapters.flatMap(a => a.mediaHosts || [])])];
   const audioCache = createAudioCache({ maxBytes: cacheMaxBytes, ttlMs: cacheTtlMs });
-  const sharedMedia = mediaCacheConfig();
+  const sharedMedia = mediaStorageConfig();
   // Core binary files and adapter M4A files live under the same configured root.
   // Never put core cache entries in the root itself: startup cleanup is scoped to core/.
   const cacheRoot = resolve(diskCacheDir || sharedMedia.root);
