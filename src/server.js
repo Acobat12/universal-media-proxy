@@ -4,6 +4,8 @@ import http from 'node:http';
 import { registry } from './core/adapter-loader.js';
 import { parallelAudio, createAudioCache } from './core/parallel.js';
 import { createDiskCache } from './core/disk-cache.js';
+import { mediaCacheConfig } from './core/adapter-media-cache.js';
+import { join, resolve } from 'node:path';
 import { pinnedFetch } from './core/transport.js';
 import { HttpError, fail } from './core/errors.js';
 import { assertPublicUrl } from './core/security.js';
@@ -17,7 +19,11 @@ export function createHandler({ secret, publicBaseUrl, allowedHosts = DEFAULT_HO
   // Adapter-declared CDN domains extend the trusted allowlist; DNS/IP checks still apply.
   const effectiveAllowedHosts = [...new Set([...allowedHosts, ...registry.adapters.flatMap(a => a.mediaHosts || [])])];
   const audioCache = createAudioCache({ maxBytes: cacheMaxBytes, ttlMs: cacheTtlMs });
-  const diskCache = createDiskCache({ ...(diskCacheDir ? { directory: diskCacheDir } : {}), ttlMs: diskCacheTtlMs, maxBytes: diskCacheMaxBytes, maxFileBytes: diskCacheMaxFileBytes });
+  const sharedMedia = mediaCacheConfig();
+  // Core binary files and adapter M4A files live under the same configured root.
+  // Never put core cache entries in the root itself: startup cleanup is scoped to core/.
+  const cacheRoot = resolve(diskCacheDir || sharedMedia.root);
+  const diskCache = createDiskCache({ directory: join(cacheRoot, 'core'), ttlMs: diskCacheTtlMs, maxBytes: diskCacheMaxBytes, maxFileBytes: diskCacheMaxFileBytes });
   let activeStreams = 0;
   return async function handler(req, res) {
     const send = (status, data) => { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' }); res.end(JSON.stringify(data)); };
