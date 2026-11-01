@@ -69,6 +69,30 @@ export function startServer(env = process.env) {
   const handler = createHandler({ publicBaseUrl: env.PUBLIC_BASE_URL, allowedHosts: (env.ALLOWED_UPSTREAM_HOSTS || DEFAULT_HOSTS.join(',')).split(',').map(s => s.trim()).filter(Boolean), maxBytes: Number(env.MAX_TRANSFER_BYTES || 1073741824), maxConcurrent: Number(env.MAX_CONCURRENT_STREAMS || 4), fallbackEnabled: env.ENABLE_YTDLP === 'true', fallbackHosts: (env.YTDLP_ALLOWED_HOSTS || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean), defaultMode: 'parallel', parallelThreads: Number(env.PARALLEL_THREADS || 8), parallelChunkBytes: Number(env.PARALLEL_CHUNK_BYTES || 524288), cacheMaxBytes: Number(env.CACHE_MAX_BYTES || 67108864), cacheMaxFileBytes: Number(env.CACHE_MAX_FILE_BYTES || 33554432), cacheTtlMs: Number(env.CACHE_TTL_MS || 600000), diskCacheDir: env.DISK_CACHE_DIR, diskCacheTtlMs: Number(env.DISK_CACHE_TTL_MS || 900000), diskCacheMaxBytes: Number(env.DISK_CACHE_MAX_BYTES || 1073741824), diskCacheMaxFileBytes: Number(env.DISK_CACHE_MAX_FILE_BYTES || 268435456) });
   const votGateway = env.ENABLE_VOT_PROXY === 'true' ? createVotGateway({ yandexApiUrl: env.YANDEX_API_URL, serverId: env.SERVER_ID, maxBodyBytes: Number(env.VOT_MAX_BODY_BYTES || 1048576) }) : null;
   const server = http.createServer((req, res) => {
+    const started = process.hrtime.bigint();
+
+    const logRequest = (event) => {
+      const durationMs = Number(process.hrtime.bigint() - started) / 1e6;
+      let path = '[invalid]';
+
+      try {
+        path = new URL(req.url || '/', 'http://localhost').pathname;
+      } catch {}
+
+      console.log('[HTTP ACCESS]', JSON.stringify({
+        method: req.method,
+        path,
+        status: res.statusCode,
+        durationMs: Math.round(durationMs),
+        event
+      }));
+    };
+
+    res.once('finish', () => logRequest('finish'));
+    res.once('close', () => {
+      if (!res.writableFinished) logRequest('aborted');
+    });
+
     // Catch rejected promises from every route, including VOT gateway routes.
     // An unhandled rejection otherwise terminates Node.js with default settings.
     const dispatch = async () => {

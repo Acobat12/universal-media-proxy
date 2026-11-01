@@ -2,9 +2,9 @@ import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { createReadStream } from 'node:fs';
 import { mkdir, rename, stat, unlink } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fail } from '../core/errors.js';
+import { adapterMediaCache } from '../core/adapter-media-cache.js';
 import { signedProxyMediaUrlFromEnvelope } from '../core/vot-protobuf.js';
 
 const MEDIA = /^\/media\/cloudmailru\/([A-Za-z0-9_-]{4,256})\/audio\.m4a$/;
@@ -12,7 +12,9 @@ const registrations = new Map();
 const jobs = new Map();
 const TTL = 24 * 60 * 60 * 1000;
 const LIMIT = 1000;
-const CACHE_DIR = process.env.CLOUDMAILRU_CACHE_DIR || join(tmpdir(), 'ump-cloudmailru-m4a');
+const cache = adapterMediaCache('cloudmailru', id => jobs.has(id));
+const CACHE_DIR = cache.directory;
+cache.sweep().catch(e => console.error('[CloudMailRu] Initial cache sweep failed:', e));
 const MAX_CONCURRENT = 2;
 const MAX_BUILD_MS = 20 * 60 * 1000;
 
@@ -301,6 +303,7 @@ export const cloudmailru = {
     if (!match || !['GET', 'HEAD'].includes(req.method)) return false;
     const id = match[1];
     registered(id);
+    cache.retain(id);
     try {
       await buildFile(id);
       const s = await readyFile(id);
@@ -311,12 +314,12 @@ export const cloudmailru = {
       if (range) {
         const m = /^bytes=(\d*)-(\d*)$/.exec(range);
         if (!m || (!m[1] && !m[2])) {
-          res.writeHead(416, { ...common, 'Content-Range': `bytes */${s.size}` }); res.end(); return true;
+          res.writeHead(416, { ...common, 'Content-Range': `bytes */${s.size}` }); res.end(); cache.release(id); return true;
         }
         if (!m[1]) {
           const suffix = Number(m[2]);
           if (!Number.isSafeInteger(suffix) || suffix <= 0) {
-            res.writeHead(416, { ...common, 'Content-Range': `bytes */${s.size}` }); res.end(); return true;
+            res.writeHead(416, { ...common, 'Content-Range': `bytes */${s.size}` }); res.end(); cache.release(id); return true;
           }
           start = Math.max(0, s.size - suffix);
         } else {
@@ -324,7 +327,7 @@ export const cloudmailru = {
           if (m[2]) end = Number(m[2]);
         }
         if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start >= s.size || start > end) {
-          res.writeHead(416, { ...common, 'Content-Range': `bytes */${s.size}` }); res.end(); return true;
+          res.writeHead(416, { ...common, 'Content-Range': `bytes */${s.size}` }); res.end(); cache.release(id); return true;
         }
         end = Math.min(end, s.size - 1);
         status = 206;
@@ -332,12 +335,16 @@ export const cloudmailru = {
       const headers = { ...common, 'Content-Length': end - start + 1 };
       if (status === 206) headers['Content-Range'] = `bytes ${start}-${end}/${s.size}`;
       res.writeHead(status, headers);
-      if (req.method === 'HEAD') { res.end(); return true; }
+      if (req.method === 'HEAD') { res.end(); cache.release(id); return true; }
       const stream = createReadStream(filePath(id), { start, end });
       stream.on('error', e => { console.error('[CloudMailRu] file read:', e); res.destroy(e); });
-      res.on('close', () => stream.destroy());
+      let released = false;
+      const release = () => { if (!released) { released = true; cache.release(id); } };
+      res.on('close', () => { stream.destroy(); release(); });
+      stream.on('close', release);
       stream.pipe(res);
     } catch (e) {
+      cache.release(id);
       console.error('[CloudMailRu] M4A preparation failed:', e);
       if (!res.headersSent) { res.writeHead(502, { 'Content-Type': 'text/plain' }); res.end('Cloud Mail.ru M4A preparation failed'); }
       else res.destroy(e);

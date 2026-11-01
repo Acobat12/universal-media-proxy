@@ -39,7 +39,7 @@ read -rp 'Установить Node.js 22 и системную службу? [Y
 [[ ! "$INSTALL_CONFIRM" =~ ^[NnНн]$ ]] || exit 1
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y ca-certificates curl gnupg openssl python3
+apt-get install -y ca-certificates curl gnupg openssl python3 ffmpeg
 if ! command -v node >/dev/null || [[ "$(node -p 'Number(process.versions.node.split(".")[0])')" -lt 22 ]]; then
   echo 'Устанавливается Node.js 22 из NodeSource (нужен интернет)'
   curl -fsSL https://deb.nodesource.com/setup_22.x -o /tmp/ump-nodesource.sh
