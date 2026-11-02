@@ -1,3 +1,9 @@
+import { createHash } from 'node:crypto';
+import { createReadStream } from 'node:fs';
+import { mkdir, open, rename, rm, stat } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { spawn } from 'node:child_process';
 import { fail } from '../core/errors.js';
 import { signedProxyMediaUrlFromEnvelope } from '../core/vot-protobuf.js';
 const SITE = ['www.bilibili.com', 'bilibili.com'];
@@ -22,9 +28,119 @@ async function json(url, fetcher, signal) {
 const bilibiliRegistrations = new Map();
 const BILIBILI_REGISTRATION_TTL = 24 * 60 * 60 * 1000;
 
+
+// Cheese/Bangumi registrations are ephemeral and scoped to the running process.
+const directRegistrations = new Map();
+const directJobs = new Map();
+const DIRECT_TTL = 30 * 60 * 1000;
+const MAX_DIRECT_BYTES = 256 * 1024 * 1024;
+const CHUNK = 1024 * 1024;
+const CACHE = join(process.env.DISK_CACHE_DIR || join(tmpdir(), 'universal-media-proxy-cache'), 'bilibili-direct');
+function safeCdn(value) {
+  let u;
+  try { u = new URL(value); } catch { fail(400, 'Invalid CDN URL'); }
+  if (u.protocol !== 'https:' || u.username || u.password || (u.port && u.port !== '443') ||
+      !(/^(?:[a-z0-9-]+\.)+(?:bilivideo\.com|hdslb\.com)$/i.test(u.hostname) || u.hostname === "upos-hz-mirrorakam.akamaized.net") ||
+      !/\.(?:mp4|m4s)(?:$)/i.test(u.pathname)) fail(400, 'CDN URL not allowed');
+  return u.href;
+}
+function directPath(kind, id) { return `/media/bilibili/${kind}/${id}/audio.m4a`; }
+async function downloadDirect(entry, output) {
+  const controller = new AbortController();
+  const headers = { ...HEADERS, Range: 'bytes=0-0' };
+  const probe = await fetch(entry.sourceUrl, { headers, redirect: 'manual', signal: AbortSignal.timeout(15000) });
+  if (probe.status !== 206) fail(502, `CDN probe HTTP ${probe.status}`);
+  const m = /^bytes 0-0\/(\d+)$/.exec(probe.headers.get('content-range') || '');
+  await probe.body?.cancel();
+  const size = Number(m?.[1]);
+  if (!Number.isSafeInteger(size) || size < 1 || size > MAX_DIRECT_BYTES) fail(413, 'CDN file too large or unknown');
+  const input = `${output}.input.mp4`;
+  const tmp = `${output}.partial.m4a`;
+  const fh = await open(input, 'w', 0o600);
+  try {
+    await fh.truncate(size);
+    let next = 0;
+    const count = Math.ceil(size / CHUNK);
+    async function worker() {
+      while (next < count) {
+        const index = next++;
+        const start = index * CHUNK, end = Math.min(size - 1, start + CHUNK - 1);
+        let done = false;
+        for (let attempt = 0; attempt < 5 && !done; attempt++) {
+          try {
+            const r = await fetch(entry.sourceUrl, {
+              headers: { ...HEADERS, Range: `bytes=${start}-${end}` },
+              redirect: 'manual', signal: AbortSignal.timeout(20000)
+            });
+            if (r.status !== 206 || r.headers.get('content-range') !== `bytes ${start}-${end}/${size}`) {
+              await r.body?.cancel(); throw Error(`Invalid CDN range response: ${r.status}`);
+            }
+            const b = Buffer.from(await r.arrayBuffer());
+            if (b.length !== end - start + 1) throw Error('Incomplete CDN chunk');
+            await fh.write(b, 0, b.length, start);
+            done = true;
+          } catch (err) {
+            if (attempt === 4) throw err;
+            await new Promise(r => setTimeout(r, 250 * (attempt + 1)));
+          }
+        }
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(32, count) }, worker));
+  } finally { await fh.close(); }
+  try {
+    await new Promise((resolve, reject) => {
+      const child = spawn('ffmpeg', ['-nostdin', '-hide_banner', '-loglevel', 'error', '-y', '-i', input,
+        '-map', '0:a:0', '-vn', '-c:a', 'copy', '-movflags', '+faststart', tmp], { stdio: ['ignore', 'ignore', 'pipe'] });
+      let stderr = '';
+      child.stderr.on('data', b => { stderr = (stderr + b.toString()).slice(-2048); });
+      child.on('error', reject);
+      child.on('close', code => code === 0 ? resolve() : reject(Error(`ffmpeg failed (${code}): ${stderr}`)));
+    });
+    await rename(tmp, output);
+  } finally { await rm(input, { force: true }); await rm(tmp, { force: true }); }
+}
+async function serveDirect(req, res, path) {
+  const entry = directRegistrations.get(path);
+  if (!entry || entry.until < Date.now()) fail(404, 'Bilibili registration expired');
+  await mkdir(CACHE, { recursive: true, mode: 0o700 });
+  const output = join(CACHE, `${createHash('sha256').update(path + '\0' + entry.sourceUrl).digest('hex')}.m4a`);
+  if (!directJobs.has(output)) {
+    const job = (async () => {
+      try { if ((await stat(output)).size > 0) return; } catch {}
+      await downloadDirect(entry, output);
+    })();
+    directJobs.set(output, job);
+    job.finally(() => directJobs.delete(output)).catch(() => {});
+  }
+  await directJobs.get(output);
+  const size = (await stat(output)).size;
+  const match = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range || '');
+  let start = 0, end = size - 1, status = 200;
+  if (req.headers.range) {
+    if (!match || (!match[1] && !match[2])) {
+      res.writeHead(416, { 'Content-Range': `bytes */${size}` }); res.end(); return;
+    }
+    if (!match[1]) { const suffix = Number(match[2]); start = Math.max(0, size - suffix); }
+    else { start = Number(match[1]); end = match[2] ? Number(match[2]) : end; }
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start >= size || end < start) {
+      res.writeHead(416, { 'Content-Range': `bytes */${size}` }); res.end(); return;
+    }
+    end = Math.min(end, size - 1); status = 206;
+  }
+  res.writeHead(status, { 'Content-Type': 'audio/mp4', 'Accept-Ranges': 'bytes',
+    'Content-Length': end - start + 1, ...(status === 206 ? { 'Content-Range': `bytes ${start}-${end}/${size}` } : {}),
+    'Cache-Control': 'private, max-age=60' });
+  if (req.method === 'HEAD') { res.end(); return; }
+  createReadStream(output, { start, end }).on('error', e => res.destroy(e)).pipe(res);
+}
+
 export const bilibili = {
   id: 'bilibili',
-  async handleRequest({ req, url, base, send }) {
+  async handleRequest({ req, res, url, base, send }) {
+    if (/^\/media\/bilibili\/(?:cheese|bangumi)\/[A-Za-z0-9_-]+\/audio\.m4a$/.test(url.pathname) && ['GET', 'HEAD'].includes(req.method)) {
+      await serveDirect(req, res, url.pathname); return true;
+    }
     if (url.pathname !== '/api/bilibili/register' || req.method !== 'POST') return false;
     let size = 0;
     const chunks = [];
@@ -36,6 +152,17 @@ export const bilibili = {
     let data;
     try { data = JSON.parse(Buffer.concat(chunks).toString('utf8')); }
     catch { fail(400, 'Invalid JSON'); }
+    if (data?.type === 'cheese' || data?.type === 'bangumi') {
+      const kind = data.type;
+      const id = String(data.videoId || '');
+      if (!/^(?:ss|ep)[0-9]{1,20}$/.test(id)) fail(400, 'Invalid Cheese/Bangumi ID');
+      const sourceUrl = safeCdn(data.sourceUrl);
+      const path = directPath(kind, id);
+      for (const [k, v] of directRegistrations) if (v.until < Date.now()) directRegistrations.delete(k);
+      if (directRegistrations.size >= 2000) directRegistrations.delete(directRegistrations.keys().next().value);
+      directRegistrations.set(path, { sourceUrl, until: Date.now() + DIRECT_TTL });
+      send(200, { mediaUrl: new URL(path, base).href }); return true;
+    }
     const bvid = String(data?.bvid || '');
     const page = Number(data?.page ?? 1);
     if (!/^BV[A-Za-z0-9]{8,20}$/.test(bvid) || !Number.isSafeInteger(page) || page < 1 || page > 1000) {
@@ -52,7 +179,7 @@ export const bilibili = {
     send(200, { mediaUrl: new URL(`/media/bilibili/${bvid}/p${page}/audio.m4a`, base).href });
     return true;
   },
-  mediaHosts: ['bilivideo.com', 'bilibili.com', 'hdslb.com'],
+  mediaHosts: ['bilivideo.com', 'bilibili.com', 'hdslb.com', 'upos-hz-mirrorakam.akamaized.net'],
   stableMediaPath(url) {
     const { bvid, page } = canonicalBilibiliVideo(url.href);
     return `/media/bilibili/${bvid}/p${page}/audio.m4a`;
@@ -75,7 +202,7 @@ export const bilibili = {
     try { candidate = new URL(signed); base = new URL(publicBaseUrl); }
     catch { return null; }
     if (candidate.origin !== base.origin ||
-        !/^\/media\/bilibili\/BV[A-Za-z0-9]{8,20}\/p(?:[1-9]\d{0,2}|1000)\/audio\.m4a$/.test(candidate.pathname) ||
+        !(/\/media\/bilibili\/BV[A-Za-z0-9]{8,20}\/p(?:[1-9]\d{0,2}|1000)\/audio\.m4a$/.test(candidate.pathname) || /^\/media\/bilibili\/(?:cheese|bangumi)\/(?:ss|ep)[0-9]{1,20}\/audio\.m4a$/.test(candidate.pathname)) ||
         candidate.search || candidate.hash || candidate.username || candidate.password) return null;
     console.log('[MEDIA MODE] Bilibili signed proxy media URL accepted; forwarding unchanged');
     return { body, mediaUrl: candidate.href };
