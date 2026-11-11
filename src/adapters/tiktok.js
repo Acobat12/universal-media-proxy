@@ -1,6 +1,5 @@
 import { withTikTokPage } from '../core/tiktok-browser.js';
 import { readFileSync } from 'node:fs';
-import { createHash } from 'node:crypto';
 import { mkdir, writeFile, rename } from 'node:fs/promises';
 import { dirname, resolve as resolvePath } from 'node:path';
 import { fail } from '../core/errors.js';
@@ -10,18 +9,27 @@ const VIDEO_ID = /^\d{10,25}$/;
 const MEDIA_PATH = /^\/media\/tiktok\/(\d{10,25})\/video\.mp4$/;
 const registrations = new Map();
 const dramaRegistrations = new Map();
-const DRAMA_MEDIA_PATH = /^\/media\/tiktok\/shortdrama\/([a-f0-9]{40})\/video\.mp4$/;
+const DRAMA_ID = /^(\d{10,25})\/(\d{1,6})$/;
+const DRAMA_MEDIA_PATH = /^\/media\/tiktok\/shortdrama\/(\d{10,25})\/(\d{1,6})\/video\.mp4$/;
+function dramaIdFromMediaPath(path) {
+  const match = DRAMA_MEDIA_PATH.exec(path);
+  return match ? `${match[1]}/${match[2]}` : null;
+}
+function dramaIdFromPage(pageUrl) {
+  const path = new URL(pageUrl).pathname;
+  const match = /^\/shortdrama\/episode\/(\d{10,25})\/(\d{1,6})$/.exec(path);
+  return match ? `${match[1]}/${match[2]}` : null;
+}
 const DRAMA_STORE_PATH = resolvePath(process.env.TIKTOK_SHORTDRAMA_REGISTRATIONS_FILE || '/var/cache/universal-media-proxy/tiktok-shortdrama-registrations.json');
 function parseDramaPage(value) {
   try {
     const u = new URL(value);
     if (u.protocol !== 'https:' || !['www.tiktok.com','tiktok.com','m.tiktok.com'].includes(u.hostname) ||
         u.username || u.password || u.port || u.search || u.hash ||
-        !/^\/shortdrama\/(?:[a-zA-Z0-9._~-]+\/)*[a-zA-Z0-9._~-]+\/?$/.test(u.pathname)) return null;
+        !/^\/shortdrama\/episode\/\d{10,25}\/\d{1,6}\/?$/.test(u.pathname)) return null;
     return `https://www.tiktok.com${u.pathname.replace(/\/$/, '')}`;
   } catch { return null; }
 }
-function dramaKey(pageUrl) { return createHash('sha256').update(pageUrl).digest('hex').slice(0, 40); }
 function getDramaRegistration(key) {
   const item = dramaRegistrations.get(key);
   if (item && item.until <= Date.now()) { dramaRegistrations.delete(key); persistDrama(); return null; }
@@ -36,7 +44,7 @@ async function flushDrama() {
       dramaSaveDirty = false;
       try {
         await mkdir(dirname(DRAMA_STORE_PATH), { recursive: true });
-        const records = [...dramaRegistrations].map(([key, item]) => ({key, pageUrl:item.pageUrl, until:item.until}));
+        const records = [...dramaRegistrations].map(([episodeId, item]) => ({episodeId, pageUrl:item.pageUrl, until:item.until}));
         const tmp = `${DRAMA_STORE_PATH}.${process.pid}.tmp`;
         await writeFile(tmp, JSON.stringify(records), {mode:0o600});
         await rename(tmp, DRAMA_STORE_PATH);
@@ -51,9 +59,10 @@ function loadDrama() {
     if (!Array.isArray(records)) return;
     for (const item of records) {
       const pageUrl = parseDramaPage(item?.pageUrl);
-      if (pageUrl && dramaKey(pageUrl) === item.key && Number.isFinite(item.until) &&
+      const episodeId = pageUrl ? dramaIdFromPage(pageUrl) : null;
+      if (episodeId && (item.episodeId === episodeId || item.key === episodeId) && Number.isFinite(item.until) &&
           item.until > Date.now() && dramaRegistrations.size < MAX_ENTRIES)
-        dramaRegistrations.set(item.key, {pageUrl, until:item.until});
+        dramaRegistrations.set(episodeId, {pageUrl, until:item.until});
     }
   } catch (err) { if (err.code !== 'ENOENT') diagnostic('drama-load-failed', {error:String(err.message).slice(0,120)}); }
 }
@@ -385,17 +394,107 @@ async function resolveDrama(key, forceBrowser = false) {
           }
         }
       }).catch(() => {});
+      // Collect the player and CDN candidates across a bounded observation window.
+      // A short preview can arrive before the actual episode MP4.
       const deadline = Date.now() + 12000;
-      while (candidates.size === 0 && Date.now() < deadline) await page.waitForTimeout(150);
-      for (const [candidate, mediaType] of candidates) {
+      while (Date.now() < deadline) await page.waitForTimeout(200);
+
+      const player = await page.evaluate(() => {
+        const videos = [...document.querySelectorAll('video')];
+        const eligible = videos.map((video, index) => {
+          const rect = video.getBoundingClientRect();
+          return { index, duration: video.duration, width: rect.width, height: rect.height,
+            paused: video.paused, readyState: video.readyState,
+            videoWidth: video.videoWidth, videoHeight: video.videoHeight };
+        }).filter(v => v.width > 0 && v.height > 0 &&
+          Number.isFinite(v.duration) && v.duration > 0 && v.readyState >= 1);
+        // Prefer the visible, currently playing video. Never silently select a
+        // preloaded, paused next episode as the target.
+        const active = eligible.filter(v => !v.paused);
+        return active.length === 1 ? active[0] : null;
+      }).catch(() => null);
+      diagnostic('drama-player-metadata', {
+        key, duration: player?.duration ?? null,
+        width: player?.videoWidth ?? null, height: player?.videoHeight ?? null,
+        candidateCount: candidates.size
+      });
+      const expected = item.expected;
+      diagnostic('drama-expected-metadata', {key, duration: expected?.duration ?? null,
+        width: expected?.width ?? null, height: expected?.height ?? null});
+      if (!expected) fail(502, 'Short Drama requires Firefox player metadata; re-register using updated Helper');
+      if (!player) diagnostic('drama-server-player-missing', {key});
+      else if (Math.abs(player.duration - expected.duration) > Math.max(1.5, expected.duration * 0.015) ||
+        player.videoWidth !== expected.width || player.videoHeight !== expected.height)
+        diagnostic('drama-server-player-mismatch', {key, serverDuration: player.duration,
+          expectedDuration: expected.duration});
+
+      // Probe candidate metadata inside the same browser context. The temporary
+      // video element never plays, and its metadata is not accepted without a
+      // duration match to the active player.
+      let selected = null;
+      let bestDifference = Infinity;
+      for (const [candidate, mediaType] of [...candidates].slice(0, 24)) {
         let url;
         try { url = validateMediaUrl(candidate); } catch { continue; }
-        const cookies = await context.cookies(url);
-        diagnostic('drama-candidate-selected', {key, mediaType, host:new URL(url).hostname});
-        return {url, cookie:cookies.map(c => `${c.name}=${c.value}`).join('; '),
-          userAgent:await page.evaluate(() => navigator.userAgent), obtained:Date.now(), source:'playwright'};
+        const metadata = await page.evaluate(async mediaUrl => {
+          const probe = document.createElement('video');
+          probe.preload = 'metadata';
+          probe.muted = true;
+          return await new Promise(resolve => {
+            let settled = false;
+            const finish = value => {
+              if (settled) return;
+              settled = true;
+              clearTimeout(timer);
+              probe.removeAttribute('src');
+              probe.load();
+              resolve(value);
+            };
+            const timer = setTimeout(() => finish(null), 4500);
+            probe.onloadedmetadata = () => finish({
+              duration: probe.duration,
+              width: probe.videoWidth,
+              height: probe.videoHeight
+            });
+            probe.onerror = () => finish(null);
+            probe.src = mediaUrl;
+          });
+        }, url).catch(() => null);
+        const difference = metadata && Number.isFinite(metadata.duration)
+          ? Math.abs(metadata.duration - expected.duration) : Infinity;
+        const tolerance = Math.max(1.5, expected.duration * 0.015);
+        // Allow different resolutions of the same aspect ratio.
+        const dimensionsMatch = metadata &&
+          metadata.width > 0 && metadata.height > 0 &&
+          expected.width > 0 && expected.height > 0 &&
+          Math.abs(
+            metadata.width / metadata.height -
+            expected.width / expected.height
+          ) < 0.01;
+        diagnostic('drama-candidate-checked', {
+          key, host: new URL(url).hostname,
+          duration: metadata?.duration ?? null,
+          width: metadata?.width ?? null, height: metadata?.height ?? null,
+          difference: Number.isFinite(difference) ? difference : null,
+          accepted: difference <= tolerance && dimensionsMatch
+        });
+        if (difference <= tolerance && dimensionsMatch && difference < bestDifference) {
+          bestDifference = difference;
+          selected = {url, mediaType, metadata};
+        }
       }
-      diagnostic('drama-candidates-not-found', {key});
+      if (selected) {
+        const cookies = await context.cookies(selected.url);
+        diagnostic('drama-candidate-selected', {
+          key, mediaType: selected.mediaType, host: new URL(selected.url).hostname,
+          duration: selected.metadata.duration, difference: bestDifference,
+          selectionReason: 'active-player-duration-and-dimensions'
+        });
+        return {url: selected.url, cookie: cookies.map(c => `${c.name}=${c.value}`).join('; '),
+          userAgent: await page.evaluate(() => navigator.userAgent),
+          obtained: Date.now(), source: 'playwright'};
+      }
+      diagnostic('drama-candidates-not-found', {key, expectedDuration: expected.duration, candidateCount: candidates.size});
       fail(502, 'Short Drama MP4 response not found in server browser');
     });
   })().finally(() => dramaPending.delete(pendingKey));
@@ -407,22 +506,35 @@ export const tiktok = {
   id: 'tiktok',
   mediaHosts: CDN_DOMAINS,
   async handleRequest({ req, res, url, base, send }) {
-    const dramaMatch = DRAMA_MEDIA_PATH.exec(url.pathname);
-    if (dramaMatch && ['GET','HEAD'].includes(req.method)) {
-      await serveVideo(req, res, dramaMatch[1], true);
+    const dramaId = dramaIdFromMediaPath(url.pathname);
+    if (dramaId && ['GET','HEAD'].includes(req.method)) {
+      await serveVideo(req, res, dramaId, true);
       return true;
     }
     if (url.pathname === '/api/tiktok/shortdrama/register' && req.method === 'POST') {
       const body = await readJson(req);
       if (!body || typeof body !== 'object' || Array.isArray(body) ||
-          Object.keys(body).some(k => k !== 'pageUrl')) fail(400, 'Only pageUrl is accepted');
+          Object.keys(body).some(k => !['pageUrl','duration','width','height'].includes(k))) fail(400, 'Unsupported Short Drama registration fields');
       const pageUrl = parseDramaPage(body.pageUrl);
       if (!pageUrl) fail(400, 'Invalid Short Drama pageUrl');
-      const key = dramaKey(pageUrl);
+      const supplied = ['duration','width','height'].filter(k => Object.hasOwn(body, k));
+      if (supplied.length !== 0 && supplied.length !== 3) fail(400, 'Incomplete Short Drama media metadata');
+      const expected = supplied.length === 3 ? {
+        duration: body.duration, width: body.width, height: body.height
+      } : null;
+      if (expected && !(typeof expected.duration === 'number' && Number.isFinite(expected.duration) && expected.duration > 0 && expected.duration < 86400 &&
+          Number.isInteger(expected.width) && expected.width > 0 && expected.width <= 8192 &&
+          Number.isInteger(expected.height) && expected.height > 0 && expected.height <= 8192))
+        fail(400, 'Invalid Short Drama media metadata');
+      const key = dramaIdFromPage(pageUrl);
+      if (!key || !DRAMA_ID.test(key)) fail(400, 'Invalid Short Drama episode ID');
       if (dramaRegistrations.size >= MAX_ENTRIES && !dramaRegistrations.has(key))
         dramaRegistrations.delete(dramaRegistrations.keys().next().value);
       const previous = getDramaRegistration(key);
       const entry = previous?.pageUrl === pageUrl ? previous : {pageUrl};
+      const changed = JSON.stringify(entry.expected || null) !== JSON.stringify(expected);
+      if (changed) entry.session = null;
+      entry.expected = expected;
       entry.until = Date.now() + TTL_MS;
       dramaRegistrations.set(key, entry);
       persistDrama();
@@ -457,10 +569,10 @@ export const tiktok = {
   },
   stableMediaPath() { fail(422, 'TikTok media must be registered first'); },
   async resolveMediaPath(path) {
-    const dramaMatch = DRAMA_MEDIA_PATH.exec(path);
-    if (dramaMatch) {
-      if (!getDramaRegistration(dramaMatch[1])) fail(404, 'Short Drama registration not found');
-      return {site:'tiktok', id:dramaMatch[1], contentType:'video/mp4', upstreams:[]};
+    const dramaId = dramaIdFromMediaPath(path);
+    if (dramaId) {
+      if (!getDramaRegistration(dramaId)) fail(404, 'Short Drama registration not found');
+      return {site:'tiktok', id:dramaId, contentType:'video/mp4', upstreams:[]};
     }
     const match = MEDIA_PATH.exec(path);
     if (!match || !getRegistration(match[1])) fail(404, 'TikTok registration not found');
@@ -494,9 +606,9 @@ export const tiktok = {
     if (candidate.search || candidate.hash || candidate.username || candidate.password) {
       debug('url-extra-components', details); return null;
     }
-    const dramaMatch = DRAMA_MEDIA_PATH.exec(candidate.pathname);
-    const id = dramaMatch ? dramaMatch[1] : MEDIA_PATH.exec(candidate.pathname)[1];
-    const item = dramaMatch ? getDramaRegistration(id) : getRegistration(id);
+    const dramaId = dramaIdFromMediaPath(candidate.pathname);
+    const id = dramaId || MEDIA_PATH.exec(candidate.pathname)[1];
+    const item = dramaId ? getDramaRegistration(id) : getRegistration(id);
     if (!item) { debug('registration-not-found', details); return null; }
     
     debug('accepted', { ...details, source: 'server-http-or-playwright' });
