@@ -55,8 +55,9 @@ export async function parallelAudio(req, res, source, {
   threads = Math.max(1, Math.min(threads, 24));
   chunkBytes = Math.max(64 * 1024, Math.min(chunkBytes, 4 * 1024 ** 2));
   const controller = new AbortController();
-  const abort = () => controller.abort();
+  const abort = () => controller.abort(new Error('Client disconnected'));
   res.once('close', abort);
+  try {
   const candidates = await Promise.all(source.upstreams.slice(0, 8).map(u => validateUrl(u, allowedHosts)));
   if (!candidates.length) fail(502, 'No audio CDN');
   const headers = { 'Accept-Encoding': 'identity', ...(source.headers || {}) };
@@ -67,7 +68,8 @@ export async function parallelAudio(req, res, source, {
       const cdn = candidates[attempt % candidates.length];
       const ctrl = new AbortController();
       const onAbort = () => ctrl.abort(); controller.signal.addEventListener('abort', onAbort, { once: true });
-      const timer = setTimeout(() => ctrl.abort(), idleTimeoutMs);
+      // A bounded chunk deadline, not an idle timer. Keep the transfer cancellable.
+      const timer = setTimeout(() => ctrl.abort(new Error('Chunk deadline exceeded')), idleTimeoutMs);
       try {
         const r = await fetcher(cdn, { method: 'GET', headers: { ...headers, Range: `bytes=${start}-${end}` }, signal: ctrl.signal });
         const cr = r.headers.get('content-range');
@@ -86,7 +88,11 @@ export async function parallelAudio(req, res, source, {
   try {
     let total;
     for (const cdn of candidates) {
-      const ctrl = new AbortController(); const timer = setTimeout(() => ctrl.abort(), idleTimeoutMs);
+      if (controller.signal.aborted) throw Error('Client disconnected');
+      const ctrl = new AbortController();
+      const onAbort = () => ctrl.abort(controller.signal.reason);
+      controller.signal.addEventListener('abort', onAbort, { once: true });
+      const timer = setTimeout(() => ctrl.abort(new Error('Range probe timeout')), idleTimeoutMs);
       try {
         const r = await fetcher(cdn, { method: 'GET', headers: { ...headers, Range: 'bytes=0-0' }, signal: ctrl.signal });
         const m = /^bytes 0-0\/(\d+)$/.exec(r.headers.get('content-range') || '');
@@ -94,14 +100,13 @@ export async function parallelAudio(req, res, source, {
         if (r.status !== 206 || !m) continue;
         total = Number(m[1]); if (!Number.isSafeInteger(total) || total <= 0) continue;
         break;
-      } catch { /* try another CDN */ }
-      finally { clearTimeout(timer); ctrl.abort(); }
+      } catch { if (controller.signal.aborted) throw Error('Client disconnected'); /* try another CDN */ }
+      finally { clearTimeout(timer); controller.signal.removeEventListener('abort', onAbort); ctrl.abort(); }
     }
     if (!total) {
       if (!fallbackToStream) fail(502, 'CDN does not support byte ranges');
       // Some CDNs cannot serve ranges. Preserve media availability with streaming.
-      res.off('close', abort);
-      return await proxyAudio(req, res, source, { fetcher, allowedHosts, maxBytes, refreshSource, onBytes });
+      return await proxyAudio(req, res, source, { fetcher, validateUrl, allowedHosts, maxBytes, refreshSource, retries, idleTimeoutMs, onBytes });
     }
     if (total > maxBytes) fail(413, 'Media exceeds configured limit');
     const [start, end, status] = parseRequestedRange(req.headers.range, total);
@@ -146,7 +151,7 @@ export async function parallelAudio(req, res, source, {
     res.setHeader('Cache-Control', 'private, no-store');
     res.setHeader('X-Content-Type-Options', 'nosniff');
     if (req.method === 'HEAD') { res.end(); return; }
-    const emit = async chunk => { onBytes(chunk.length); if (!res.write(chunk)) await once(res, 'drain'); };
+    const emit = async chunk => { if (controller.signal.aborted) throw new Error('Client disconnected'); onBytes(chunk.length); if (!res.write(chunk)) await once(res, 'drain', { signal: controller.signal }); };
     try {
       if (diskLease) {
         const file = createReadStream(diskLease.path, { start, end });
@@ -160,6 +165,7 @@ export async function parallelAudio(req, res, source, {
       else await build(emit);
       res.end();
     } finally { if (diskLease) { await diskLease.release(); diskLease = null; } }
-  } catch (err) { if (res.headersSent) res.destroy(err); else throw err; }
-  finally { res.off('close', abort); controller.abort(); }
+  } catch (err) { if (res.destroyed || controller.signal.aborted) return; if (res.headersSent) res.destroy(err); else throw err; }
+  finally { controller.abort(); }
+  } finally { res.off('close', abort); }
 }

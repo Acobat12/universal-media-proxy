@@ -16,12 +16,18 @@ export async function proxyAudio(req, res, source, {
   let candidates = source.upstreams.slice(0, 8);
   let refreshed = false;
   let lastError;
+  let clientClosed = res.destroyed;
+  const onClientClose = () => { clientClosed = true; };
+  res.once('close', onClientClose);
+  try {
   for (let attempt = 0; attempt < Math.max(1, candidates.length) * (retries + 1) + 1; attempt++) {
-    if (res.headersSent) return;
+    if (res.headersSent || clientClosed || res.destroyed || res.writableEnded) return;
     if (attempt >= candidates.length * (retries + 1)) {
       if (!refreshed && refreshSource) {
         refreshed = true;
         const newer = await refreshSource();
+        if (clientClosed || res.destroyed || res.writableEnded) return;
+        if (!newer?.upstreams?.length) throw Error('Refreshed CDN list is empty');
         candidates = newer.upstreams.slice(0, 8);
         source = newer;
         attempt = -1;
@@ -31,19 +37,20 @@ export async function proxyAudio(req, res, source, {
     }
     const target = candidates[Math.floor(attempt / (retries + 1))];
     const ctrl = new AbortController();
-    const onClose = () => ctrl.abort();
+    const onClose = () => ctrl.abort(new Error('Client disconnected'));
     res.once('close', onClose);
-    let connectTimer = setTimeout(() => ctrl.abort(Error('Connection timeout')), connectTimeoutMs);
+    let connectTimer = setTimeout(() => ctrl.abort(new Error('Connection timeout')), connectTimeoutMs);
     let idleTimer;
     const resetIdle = () => { clearTimeout(idleTimer); idleTimer = setTimeout(() => ctrl.abort(Error('Upstream idle timeout')), idleTimeoutMs); };
     try {
       const url = await validateUrl(target, allowedHosts);
-      resetIdle();
       const headers = { 'Accept-Encoding': 'identity', ...(source.headers || {}) };
       if (range) headers.Range = range;
       // HEAD is forwarded as HEAD. A CDN which rejects HEAD may be handled by a Range probe later.
       const response = await fetcher(url, { method: req.method, headers, signal: ctrl.signal, redirect: 'manual', connectTimeoutMs });
       clearTimeout(connectTimer); connectTimer = null;
+      // Start idle timeout only after headers arrive.
+      resetIdle();
       if (![200, 206, 416].includes(response.status)) throw Error(`Upstream HTTP ${response.status}`);
       if (range && response.status === 200) throw Error('Upstream ignored Range');
       const contentRange = response.headers.get('content-range');
@@ -89,13 +96,14 @@ export async function proxyAudio(req, res, source, {
         transferred += chunk.length;
         if (transferred > maxBytes) { ctrl.abort(); res.destroy(Error('Transfer limit exceeded')); return; }
         onBytes(chunk.length);
-        if (!res.write(chunk)) await once(res, 'drain');
+        if (!res.write(chunk)) await once(res, 'drain', { signal: ctrl.signal });
       }
       clearTimeout(idleTimer);
       if (expectedLength !== null && transferred !== expectedLength) { res.destroy(Error('Incomplete upstream response')); return; }
       res.end(); return;
     } catch (err) {
       lastError = err;
+      if (clientClosed || res.destroyed || res.writableEnded) return;
      console.error('[PROXY ERROR]', {
   site: source.site,
   message: err?.message,
@@ -107,8 +115,10 @@ export async function proxyAudio(req, res, source, {
       if (err.status && err.status < 500) throw err;
       if (attempt % (retries + 1) !== retries) await sleep(Math.min(500 * (attempt + 1), 1500));
     } finally {
+      ctrl.abort();
       clearTimeout(connectTimer); clearTimeout(idleTimer); res.off('close', onClose);
     }
   }
-  fail(502, `Upstream unavailable: ${lastError?.message || 'no candidates'}`);
+  if (!clientClosed && !res.destroyed) fail(502, `Upstream unavailable: ${lastError?.message || 'no candidates'}`);
+  } finally { res.off('close', onClientClose); }
 }

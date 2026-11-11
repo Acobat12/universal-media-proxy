@@ -24,7 +24,15 @@ export async function assertPublicUrl(input, allowedHosts) {
   const h = u.hostname.toLowerCase().replace(/\.$/, '');
   if (!safeHostname(h)) fail(400, 'Unsafe upstream hostname');
   if (!allowedHosts.some(x => h === x || h.endsWith('.' + x))) fail(403, 'Upstream hostname not allowed');
-  const addresses = await lookup(h, { all: true, verbatim: true });
+  // Bound DNS validation so a stalled resolver cannot hold a media job forever.
+  let dnsTimer;
+  let addresses;
+  try {
+    addresses = await Promise.race([
+      lookup(h, { all: true, verbatim: true }),
+      new Promise((_, reject) => { dnsTimer = setTimeout(() => reject(new Error('DNS validation timeout')), 10000); })
+    ]);
+  } finally { clearTimeout(dnsTimer); }
   if (!addresses.length || addresses.some(a => privateAddress(a.address))) fail(403, 'Private upstream address');
   return u;
 }
