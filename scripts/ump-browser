@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+if (( EUID != 0 )); then echo 'Используйте sudo ump-browser ...' >&2; exit 1; fi
+usage() { echo 'Команды: ump-browser login <tiktok|bilibili|douyin|youtube>; ump-browser list; ump-browser status; ump-browser logout <site>'; }
+command="${1:-}"; site="${2:-}"
+base=/var/cache/universal-media-proxy
+profiles="$base/browser-profiles"
+case "$site" in
+  tiktok) url=https://www.tiktok.com/login; profile="$base/tiktok-profile";;
+  bilibili) url=https://passport.bilibili.com/login; profile="$profiles/bilibili";;
+  douyin) url=https://www.douyin.com/; profile="$profiles/douyin";;
+  youtube) url=https://accounts.google.com/; profile="$profiles/youtube";;
+  '') url=''; profile='';;
+  *) echo 'Неизвестный сайт. Доступны tiktok, bilibili, douyin, youtube.' >&2; exit 2;;
+esac
+case "$command" in
+  list) printf '%s\n' tiktok bilibili douyin youtube; exit 0;;
+  status)
+    for name in tiktok bilibili douyin youtube; do
+      if [[ "$name" == tiktok ]]; then dir="$base/tiktok-profile"; else dir="$profiles/$name"; fi
+      if [[ -d "$dir" ]]; then echo "$name: профиль существует (это не подтверждение авторизации)"; else echo "$name: нет профиля"; fi
+    done
+    exit 0;;
+  logout)
+    [[ -n "$site" ]] || { usage; exit 2; }
+    echo "Удаление профиля $site завершит авторизацию на этом устройстве."
+    read -rp 'Напишите DELETE для подтверждения: ' confirm
+    [[ "$confirm" == DELETE ]] || exit 1
+    if [[ "$site" == tiktok ]]; then
+      systemctl stop universal-media-proxy.service
+      trap 'systemctl start universal-media-proxy.service' EXIT
+    fi
+    [[ ! -L "$profile" ]] || { echo 'Символьная ссылка: отказ' >&2; exit 1; }
+    rm -rf -- "$profile"
+    echo 'Профиль удалён'; exit 0;;
+  login) [[ -n "$site" ]] || { usage; exit 2; };;
+  *) usage; exit 2;;
+esac
+for cmd in Xvfb x11vnc websockify runuser timeout flock node; do
+  command -v "$cmd" >/dev/null || { echo "Не найден $cmd. Установите компоненты браузерной авторизации." >&2; exit 1; }
+done
+[[ -f /opt/universal-media-proxy/ump-browser-session.mjs ]] || { echo 'Не установлен браузерный модуль' >&2; exit 1; }
+[[ -d /usr/share/novnc ]] || { echo 'Не найден /usr/share/novnc' >&2; exit 1; }
+exec 9>/run/ump-browser.lock
+flock -n 9 || { echo 'Уже открыта другая сессия авторизации' >&2; exit 1; }
+if [[ "$site" == tiktok ]]; then
+  systemctl stop universal-media-proxy.service
+  restart_ump=true
+else restart_ump=false; fi
+pids=()
+cleanup() {
+  trap - EXIT INT TERM
+  for pid in "${pids[@]}"; do kill "$pid" 2>/dev/null || true; done
+  for pid in "${pids[@]}"; do wait "$pid" 2>/dev/null || true; done
+  if [[ "$restart_ump" == true ]]; then systemctl start universal-media-proxy.service || true; fi
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+install -d -m 0700 -o ump -g ump "$profiles"
+if [[ -e "$profile" && -L "$profile" ]]; then echo 'Профиль является символьной ссылкой: отказ' >&2; exit 1; fi
+install -d -m 0700 -o ump -g ump "$profile"
+chown ump:ump "$profile"
+# Use a private X11 display and loopback-only VNC/websocket listeners.
+display=97
+while [[ -e "/tmp/.X${display}-lock" ]]; do ((display+=1)); [[ $display -le 120 ]] || exit 1; done
+vnc_port=15900; web_port=16080
+while (echo >/dev/tcp/127.0.0.1/$vnc_port) >/dev/null 2>&1; do ((vnc_port+=1)); done
+while (echo >/dev/tcp/127.0.0.1/$web_port) >/dev/null 2>&1 || [[ $web_port -eq $vnc_port ]]; do ((web_port+=1)); done
+Xvfb ":$display" -screen 0 1366x900x24 -nolisten tcp >/dev/null 2>&1 & pids+=("$!")
+sleep 1
+kill -0 "${pids[0]}" || { echo 'Xvfb не запустился' >&2; exit 1; }
+x11vnc -display ":$display" -localhost -rfbport "$vnc_port" -forever -shared -nopw -quiet >/dev/null 2>&1 & pids+=("$!")
+websockify --web /usr/share/novnc 127.0.0.1:"$web_port" 127.0.0.1:"$vnc_port" >/dev/null 2>&1 & pids+=("$!")
+sleep 1
+kill -0 "${pids[1]}" && kill -0 "${pids[2]}" || { echo 'noVNC не запустился' >&2; exit 1; }
+ssh_port="$(sshd -T 2>/dev/null | awk '$1=="port" {print $2; exit}')"
+ssh_port="${ssh_port:-22}"
+server="$(hostname -I 2>/dev/null | awk '{print $1}')"; server="${server:-SERVER_IP}"
+echo
+printf 'На СВОЁМ компьютере выполните:\n  ssh -N -L %s:127.0.0.1:%s -p %s root@%s\n' "$web_port" "$web_port" "$ssh_port" "$server"
+printf 'Затем откройте: http://127.0.0.1:%s/vnc.html\n' "$web_port"
+echo 'В noVNC нажмите Connect. Порты слушают только 127.0.0.1 на VPS.'
+echo 'Сессия завершится через 20 минут или после Ctrl+C. После входа закройте её Ctrl+C.'
+echo 'ВАЖНО: не запускайте этот режим на чужом/общем VPS без доверия к администраторам.'
+export DISPLAY=":$display"
+# timeout covers hung/abandoned sessions; run as service user for correct cookie ownership.
+timeout --signal=TERM --kill-after=5s 20m runuser -u ump -- env DISPLAY="$DISPLAY" HOME=/opt/universal-media-proxy PLAYWRIGHT_BROWSERS_PATH=/opt/universal-media-proxy/.cache/ms-playwright /usr/bin/node /opt/universal-media-proxy/ump-browser-session.mjs "$site" "$url" "$profile" || code=$?
+if [[ "${code:-0}" == 124 ]]; then echo 'Время авторизации истекло.'; fi

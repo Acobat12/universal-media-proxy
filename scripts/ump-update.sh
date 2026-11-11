@@ -5,7 +5,7 @@ umask 077
 [[ -f /etc/ump-update/config ]] || exit 0
 # Config is installer-generated and root-only; never source arbitrary shell.
 REPO=$(sed -n 's/^UMP_REPO=//p' /etc/ump-update/config | head -n1)
-[[ "$REPO" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*/[A-Za-z0-9_.-]+$ ]] && [[ "$REPO" != *..* ]] || exit 1
+[[ "$REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || exit 1
 exec 9>/run/ump-update.lock
 flock -n 9 || exit 0
 WORK=$(mktemp -d)
